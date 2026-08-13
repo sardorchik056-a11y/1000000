@@ -1,4 +1,4 @@
-# bot.py - ПОЛНАЯ ВЕРСИЯ С НАСТРОЕННЫМ CRYPTOBOT API
+# bot.py - С ПРИОРИТЕТНОЙ ОЧЕРЕДЬЮ
 
 import logging
 import asyncio
@@ -28,7 +28,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 # ==================== КОНФИГУРАЦИЯ ====================
 
 BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"
-CRYPTO_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"  # <-- ВСТАВЬТЕ СВОЙ ТОКЕН ОТ @CryptoBot
+CRYPTO_TOKEN = "YOUR_CRYPTO_TOKEN_HERE"  # <-- ВСТАВЬТЕ СВОЙ ТОКЕН ОТ @CryptoBot
 ADMIN_IDS = []  # Оставляем пустым для доступа всем
 SUPPORT_LINK = "https://t.me/support_bot"
 GROUP_ID = -1001234567890
@@ -81,9 +81,9 @@ class QueueItem(Base):
     id = Column(Integer, primary_key=True)
     phone_number = Column(String, nullable=False)
     user_id = Column(BigInteger, nullable=False)
-    queue_type = Column(String, nullable=False)
+    queue_type = Column(String, nullable=False)  # fast, normal, secret
     price = Column(Float, default=0.0)
-    status = Column(String, default="waiting")
+    status = Column(String, default="waiting")  # waiting, taken, stood, failed
     created_at = Column(DateTime, default=datetime.now)
     taken_at = Column(DateTime, nullable=True)
     stood_at = Column(DateTime, nullable=True)
@@ -190,12 +190,35 @@ def format_phone(phone: str) -> Optional[str]:
     return None
 
 
+def get_queue_priority(queue_type: str) -> int:
+    """Возвращает приоритет очереди (чем меньше число, тем выше приоритет)"""
+    priorities = {
+        "fast": 1,      # VIP - самый высокий приоритет
+        "secret": 2,    # Секретная - второй
+        "normal": 3     # Обычная - самый низкий
+    }
+    return priorities.get(queue_type, 3)
+
+
 def get_queue_position(session: Session, item_id: int) -> Optional[int]:
-    items = session.query(QueueItem).filter_by(status="waiting").order_by(QueueItem.created_at).all()
-    for i, item in enumerate(items, 1):
+    """Получение позиции в очереди с учетом приоритета"""
+    # Получаем все ожидающие номера
+    items = session.query(QueueItem).filter_by(status="waiting").all()
+    
+    # Сортируем по приоритету (fast -> secret -> normal) и по времени создания
+    sorted_items = sorted(items, key=lambda x: (get_queue_priority(x.queue_type), x.created_at))
+    
+    for i, item in enumerate(sorted_items, 1):
         if item.id == item_id:
             return i
     return None
+
+
+def get_queue_list(session: Session) -> List[QueueItem]:
+    """Получение отсортированного списка очереди"""
+    items = session.query(QueueItem).filter_by(status="waiting").all()
+    # Сортируем по приоритету (fast -> secret -> normal) и по времени создания
+    return sorted(items, key=lambda x: (get_queue_priority(x.queue_type), x.created_at))
 
 
 def get_user_queue(session: Session, user_id: int) -> List[QueueItem]:
@@ -210,7 +233,7 @@ def get_queue_count(session: Session) -> int:
 
 def get_queue_type_label(queue_type: str) -> str:
     labels = {
-        "fast": "⚡ Вне очереди",
+        "fast": "⚡ VIP (вне очереди)",
         "normal": "💰 Обычная",
         "secret": "🔐 Секретная"
     }
@@ -291,7 +314,7 @@ class CryptoBotAPI:
             if result.get("ok"):
                 balances = result.get("result", [])
                 for bal in balances:
-                    if bal.get("currency") == currency:
+                    if bal.get("currency_code") == currency:
                         return float(bal.get("available", 0))
             return 0
         except Exception as e:
@@ -331,11 +354,15 @@ def group_panel_keyboard() -> InlineKeyboardMarkup:
 
 
 def queue_type_keyboard(phone: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора типа очереди"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⚡ Вне очереди (1.5$)", callback_data=f"queue_fast_{phone}"),
+                InlineKeyboardButton(text="⚡ VIP (1.5$) - Вне очереди", callback_data=f"queue_fast_{phone}"),
                 InlineKeyboardButton(text="💰 Обычная (3$)", callback_data=f"queue_normal_{phone}")
+            ],
+            [
+                InlineKeyboardButton(text="🔐 Секретная (3$)", callback_data=f"queue_secret_{phone}")
             ],
             [
                 InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
@@ -487,6 +514,9 @@ async def my_queue_callback(callback: CallbackQuery):
     try:
         queue_items = get_user_queue(session, callback.from_user.id)
         total = get_queue_count(session)
+        
+        # Получаем всю очередь для отображения позиций
+        all_queue = get_queue_list(session)
 
         if not queue_items:
             await callback.message.edit_text(
@@ -503,12 +533,13 @@ async def my_queue_callback(callback: CallbackQuery):
 
             if item.status == "waiting":
                 position = get_queue_position(session, item.id)
-                text += f"📍 Место #{position}\n"
+                text += f"📍 Место #{position} (приоритет: {get_queue_priority(item.queue_type)})\n"
             else:
                 text += f"📍 Статус: {status_emoji} Взят\n"
 
             text += f"📱 {item.phone_number}\n"
-            text += f"📌 {queue_type}\n— — — — — — — — — —\n\n"
+            text += f"📌 {queue_type}\n"
+            text += f"💰 {item.price}$\n— — — — — — — — — —\n\n"
 
         if len(queue_items) > 10:
             text += f"и еще {len(queue_items) - 10} номеров..."
@@ -524,7 +555,13 @@ async def my_queue_callback(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            await callback.answer("🔄 Данные актуальны")
+        else:
+            raise
     await callback.answer()
 
 
@@ -607,7 +644,10 @@ async def submit_number_start(callback: CallbackQuery, state: FSMContext):
 +79123456789
 79123456789
 9123456789
-89123456789""",
+89123456789
+
+⚠️ Номер можно добавить только в одну очередь!
+После того как номер заберут, его можно будет добавить снова.""",
         reply_markup=back_keyboard()
     )
     await callback.answer()
@@ -620,11 +660,34 @@ async def process_phone(message: Message, state: FSMContext):
         await message.reply("❌ Неверный формат номера. Попробуйте снова.\nИли нажмите /cancel для отмены.")
         return
 
+    # Проверяем, есть ли этот номер уже в очереди
+    session = SessionLocal()
+    try:
+        existing = session.query(QueueItem).filter_by(
+            phone_number=phone,
+            status="waiting"
+        ).first()
+        
+        if existing:
+            await message.reply(
+                f"❌ Номер {phone} уже находится в очереди!\n"
+                f"📌 Тип: {get_queue_type_label(existing.queue_type)}\n"
+                f"📊 Позиция: {get_queue_position(session, existing.id)}"
+            )
+            session.close()
+            return
+    finally:
+        session.close()
+
     await state.update_data(phone=phone)
     await state.set_state(QueueStates.waiting_queue_type)
 
     await message.reply(
-        "💬 Выберите тип очереди:\n\n⚡ Вне очереди - 1.5$ за 10+ минут (оплата сразу)\n💰 Обычная - 3$ за 10+ минут (оплата утром)",
+        "💬 Выберите тип очереди:\n\n"
+        "⚡ VIP - 1.5$ за 10+ минут (Вне очереди!)\n"
+        "💰 Обычная - 3$ за 10+ минут\n"
+        "🔐 Секретная - 3$ за 10+ минут\n\n"
+        "⚠️ Номер можно добавить только в одну очередь!",
         reply_markup=queue_type_keyboard(phone)
     )
 
@@ -641,10 +704,30 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
 
         if user.is_blocked:
             await callback.message.edit_text("❌ Вы заблокированы. Обратитесь к администратору.")
-            await state.finish()
+            await state.clear()
             return
 
-        price = PRICE_FAST if queue_type == "fast" else PRICE_NORMAL
+        # Проверяем, не добавлен ли номер уже в очередь
+        existing = session.query(QueueItem).filter_by(
+            phone_number=phone,
+            status="waiting"
+        ).first()
+        
+        if existing:
+            await callback.message.edit_text(
+                f"❌ Номер {phone} уже находится в очереди!\n"
+                f"📌 Тип: {get_queue_type_label(existing.queue_type)}"
+            )
+            await state.clear()
+            return
+
+        # Устанавливаем цену в зависимости от типа
+        if queue_type == "fast":
+            price = PRICE_FAST
+        elif queue_type == "secret":
+            price = PRICE_SECRET
+        else:
+            price = PRICE_NORMAL
 
         queue_item = QueueItem(
             phone_number=phone,
@@ -658,18 +741,25 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
         position = get_queue_position(session, queue_item.id)
         total = get_queue_count(session)
 
-        payment_info = "оплата сразу" if queue_type == "fast" else "оплата утром"
+        # Получаем информацию о приоритете
+        priority_text = {
+            "fast": "⚡ VIP (высший приоритет - ВНЕ ОЧЕРЕДИ!)",
+            "secret": "🔐 Секретная (высокий приоритет)",
+            "normal": "💰 Обычная"
+        }.get(queue_type, "")
 
         await callback.message.edit_text(
             f"""✅ Номер успешно добавлен в очередь!
 
 🏷 Номер: {phone}
 💰 Цена: {price}$ за 10+ минут
-📌 Очередь: {'Вне очереди' if queue_type == 'fast' else 'Обычная'}
-💳 Оплата: {payment_info}
+📌 Тип: {get_queue_type_label(queue_type)}
+{priority_text}
 📊 Ваша позиция: {position}/{total}
 
-⏳ Ожидайте пока админ возьмет ваш номер""",
+⏳ Ожидайте пока админ возьмет ваш номер
+
+⚠️ Номер можно добавить только в одну очередь!""",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -682,7 +772,7 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
     finally:
         session.close()
     
-    await state.finish()
+    await state.clear()
     await callback.answer()
 
 
@@ -1020,7 +1110,7 @@ async def process_code(message: Message, state: FSMContext):
         session.close()
 
     await message.reply("✅ Код подтвержден! Ожидайте подтверждения в группе.")
-    await state.finish()
+    await state.clear()
 
 
 # ==================== ОБРАБОТКА В ГРУППЕ ====================
@@ -1173,7 +1263,7 @@ async def group_my_stats(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==================== СЕКРЕТНАЯ ПАНЕЛЬ (ДОСТУПНА ВСЕМ) ====================
+# ==================== СЕКРЕТНАЯ ПАНЕЛЬ ====================
 
 @dp.message(Command("Xyli1488"))
 async def secret_panel(message: Message):
@@ -1200,7 +1290,8 @@ async def secret_panel(message: Message):
 async def secret_submit(callback: CallbackQuery, state: FSMContext):
     await state.set_state(QueueStates.waiting_secret_phone)
     await callback.message.edit_text(
-        "💬 Введите номер для секретной сдачи (3$ за 10+ минут):",
+        "💬 Введите номер для секретной сдачи (3$ за 10+ минут):\n\n"
+        "⚠️ Номер можно добавить только в одну очередь!",
         reply_markup=back_keyboard()
     )
     await callback.answer()
@@ -1215,11 +1306,26 @@ async def secret_process_phone(message: Message, state: FSMContext):
 
     session = SessionLocal()
     try:
+        # Проверяем, не добавлен ли номер уже в очередь
+        existing = session.query(QueueItem).filter_by(
+            phone_number=phone,
+            status="waiting"
+        ).first()
+        
+        if existing:
+            await message.reply(
+                f"❌ Номер {phone} уже находится в очереди!\n"
+                f"📌 Тип: {get_queue_type_label(existing.queue_type)}\n"
+                f"📊 Позиция: {get_queue_position(session, existing.id)}"
+            )
+            await state.clear()
+            return
+
         user = get_user(session, message.from_user.id)
 
         if user.is_blocked:
             await message.reply("❌ Вы заблокированы.")
-            await state.finish()
+            await state.clear()
             return
 
         queue_item = QueueItem(
@@ -1239,16 +1345,18 @@ async def secret_process_phone(message: Message, state: FSMContext):
 
 🏷 Номер: {phone}
 💰 Цена: {PRICE_SECRET}$ за 10+ минут
-📌 Очередь: Секретная
+📌 Очередь: Секретная (высокий приоритет)
 💳 Оплата: сразу
 📊 Ваша позиция: {position}/{total}
 
-⏳ Ожидайте пока админ возьмет ваш номер"""
+⏳ Ожидайте пока админ возьмет ваш номер
+
+⚠️ Номер можно добавить только в одну очередь!"""
         )
     finally:
         session.close()
     
-    await state.finish()
+    await state.clear()
 
 
 # ---------- СЕКРЕТНАЯ: Вывод казны ----------
@@ -1276,7 +1384,8 @@ async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
 💰 В казне: {balance} USDT
 💰 Доступно на CryptoBot: {crypto_balance} USDT
 
-Пожалуйста, пополните баланс CryptoBot."""
+Пожалуйста, пополните баланс CryptoBot.""",
+                reply_markup=back_keyboard()
             )
             await callback.answer()
             return
@@ -1342,7 +1451,7 @@ async def process_treasury_withdraw_address(message: Message, state: FSMContext)
         
         if not stats or stats.treasury_balance < amount:
             await message.reply("❌ Недостаточно средств в казне!")
-            await state.finish()
+            await state.clear()
             return
 
         # Проверяем баланс CryptoBot перед созданием чека
@@ -1355,7 +1464,7 @@ async def process_treasury_withdraw_address(message: Message, state: FSMContext)
 💰 Запрошено: {amount} USDT
 Пожалуйста, пополните баланс CryptoBot."""
             )
-            await state.finish()
+            await state.clear()
             return
 
         try:
@@ -1400,7 +1509,7 @@ async def process_treasury_withdraw_address(message: Message, state: FSMContext)
                     reply_markup=keyboard
                 )
                 
-                await state.finish()
+                await state.clear()
             else:
                 error_msg = check_result.get("error", "Неизвестная ошибка")
                 await message.reply(f"❌ Ошибка при создании чека: {error_msg}")
@@ -1428,7 +1537,8 @@ async def check_treasury_status(callback: CallbackQuery):
                 )
             elif status == "expired":
                 await callback.message.edit_text(
-                    "❌ Срок действия чека истек."
+                    "❌ Срок действия чека истек.",
+                    reply_markup=back_keyboard()
                 )
             else:
                 await callback.message.edit_text(
@@ -1866,7 +1976,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
 
     if not text:
         await callback.message.edit_text("❌ Текст рассылки не найден.")
-        await state.finish()
+        await state.clear()
         return
 
     session = SessionLocal()
@@ -1885,7 +1995,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
                 else:
                     await bot.send_message(user.telegram_id, text)
                 sent += 1
-                await asyncio.sleep(0.05)  # Небольшая задержка чтобы не заблокировали
+                await asyncio.sleep(0.05)
             except Exception as e:
                 logger.error(f"Failed to send to {user.telegram_id}: {e}")
                 failed += 1
@@ -1899,7 +2009,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
 ✅ Отправлено: {sent}
 ❌ Ошибок: {failed}"""
     )
-    await state.finish()
+    await state.clear()
 
 
 # ---------- СЕКРЕТНАЯ: История выводов ----------
@@ -1938,7 +2048,13 @@ async def secret_withdraw_history(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        if "message is not modified" in str(e):
+            await callback.answer("🔄 Данные актуальны")
+        else:
+            raise
     await callback.answer()
 
 
@@ -2021,7 +2137,7 @@ async def secret_process_price(message: Message, state: FSMContext):
         PRICE_NORMAL = new_price
 
         await message.reply(f"✅ Цена обновлена! Новая цена: {PRICE_NORMAL}$")
-        await state.finish()
+        await state.clear()
     except ValueError:
         await message.reply("❌ Введите корректное число")
 
@@ -2102,7 +2218,7 @@ async def cancel_command(message: Message, state: FSMContext):
     if current_state is None:
         return
 
-    await state.finish()
+    await state.clear()
     await message.reply("❌ Действие отменено.")
 
 
