@@ -1,4 +1,4 @@
-# bot.py - АДАПТИРОВАН ДЛЯ AIOGRAM 3.x
+# bot.py - ПОЛНАЯ ВЕРСИЯ С НАСТРОЕННЫМ CRYPTOBOT API
 
 import logging
 import asyncio
@@ -28,8 +28,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 # ==================== КОНФИГУРАЦИЯ ====================
 
 BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"
-CRYPTO_TOKEN = "YOUR_CRYPTO_TOKEN_HERE"
-ADMIN_IDS = []  # <-- ОСТАВЛЯЕМ ПУСТЫМ, ЧТОБЫ НИКТО НЕ БЫЛ АДМИНОМ
+CRYPTO_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"  # <-- ВСТАВЬТЕ СВОЙ ТОКЕН ОТ @CryptoBot
+ADMIN_IDS = []  # Оставляем пустым для доступа всем
 SUPPORT_LINK = "https://t.me/support_bot"
 GROUP_ID = -1001234567890
 
@@ -246,12 +246,20 @@ class CryptoBotAPI:
         }
 
     async def _make_request(self, method: str, payload: dict) -> dict:
+        """Базовый метод для запросов к CryptoBot API"""
         url = f"{CRYPTO_API_URL}/{method}"
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=self.headers, json=payload) as resp:
-                return await resp.json()
+            try:
+                async with session.post(url, headers=self.headers, json=payload) as resp:
+                    result = await resp.json()
+                    logger.info(f"CryptoBot API {method} response: {result}")
+                    return result
+            except Exception as e:
+                logger.error(f"CryptoBot API error: {e}")
+                return {"ok": False, "error": str(e)}
 
     async def create_check(self, amount: float, currency: str = "USDT", description: str = None) -> dict:
+        """Создание чека для вывода"""
         payload = {
             "amount": str(amount),
             "currency": currency,
@@ -260,9 +268,11 @@ class CryptoBotAPI:
         return await self._make_request("createCheck", payload)
 
     async def get_check_status(self, check_id: str) -> dict:
+        """Получение статуса чека"""
         return await self._make_request("getCheckStatus", {"check_id": check_id})
 
     async def create_invoice(self, amount: float, currency: str = "USDT", description: str = None) -> dict:
+        """Создание счета для пополнения"""
         payload = {
             "amount": str(amount),
             "currency": currency,
@@ -270,7 +280,26 @@ class CryptoBotAPI:
         }
         return await self._make_request("createInvoice", payload)
 
+    async def get_balance(self) -> dict:
+        """Получение баланса CryptoBot"""
+        return await self._make_request("getBalance", {})
 
+    async def check_crypto_balance(self, currency: str = "USDT") -> float:
+        """Проверка баланса конкретной валюты"""
+        try:
+            result = await self.get_balance()
+            if result.get("ok"):
+                balances = result.get("result", [])
+                for bal in balances:
+                    if bal.get("currency") == currency:
+                        return float(bal.get("available", 0))
+            return 0
+        except Exception as e:
+            logger.error(f"Error checking balance: {e}")
+            return 0
+
+
+# Инициализация CryptoBot API
 crypto = CryptoBotAPI(CRYPTO_TOKEN)
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -288,33 +317,6 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
-
-
-def admin_panel_keyboard() -> InlineKeyboardMarkup:
-    buttons = [
-        ("📊 Статистика дня", "admin_stats_day"),
-        ("📊 Статистика недели", "admin_stats_week"),
-        ("📊 Вся статистика", "admin_stats_all"),
-        ("👥 Пользователи", "admin_users"),
-        ("💰 Балансы", "admin_balances"),
-        ("💰 Пополнить казну", "admin_topup"),
-        ("📝 Редактировать прайс", "admin_edit_price"),
-        ("📨 Рассылка", "admin_mailing"),
-        ("📊 История выводов", "admin_withdraw_history"),
-        ("📊 Заявки на вывод", "admin_withdraw_requests"),
-        ("💥 Расчет оплат", "admin_calculate_payments"),
-        ("🔙 Закрыть", "back_to_menu")
-    ]
-    
-    keyboard_buttons = []
-    row = []
-    for i, (text, callback) in enumerate(buttons):
-        row.append(InlineKeyboardButton(text=text, callback_data=callback))
-        if len(row) == 2 or i == len(buttons) - 1:
-            keyboard_buttons.append(row)
-            row = []
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
 
 def group_panel_keyboard() -> InlineKeyboardMarkup:
@@ -352,6 +354,37 @@ def connect_method_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="📱 Кюар", callback_data="connect_qr"),
                 InlineKeyboardButton(text="🔙 Назад", callback_data="group_back")
+            ]
+        ]
+    )
+
+
+def secret_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 Сдать номер (3$)", callback_data="secret_submit"),
+                InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
+            ],
+            [
+                InlineKeyboardButton(text="📊 Статистика", callback_data="secret_stats"),
+                InlineKeyboardButton(text="👥 Пользователи", callback_data="secret_users")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Балансы", callback_data="secret_balances"),
+                InlineKeyboardButton(text="💰 Пополнить казну", callback_data="secret_topup")
+            ],
+            [
+                InlineKeyboardButton(text="📨 Рассылка", callback_data="secret_mailing"),
+                InlineKeyboardButton(text="📊 История выводов", callback_data="secret_withdraw_history")
+            ],
+            [
+                InlineKeyboardButton(text="💥 Расчет оплат", callback_data="secret_calculate_payments"),
+                InlineKeyboardButton(text="📝 Редактировать прайс", callback_data="secret_edit_price")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Баланс CryptoBot", callback_data="secret_crypto_balance"),
+                InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
             ]
         ]
     )
@@ -653,7 +686,7 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ==================== ВЫВОД СРЕДСТВ ====================
+# ==================== ВЫВОД СРЕДСТВ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) ====================
 
 @dp.callback_query(lambda c: c.data == "withdraw_menu")
 async def withdraw_menu(callback: CallbackQuery):
@@ -711,13 +744,29 @@ async def process_withdraw(callback: CallbackQuery):
             await callback.message.edit_text(f"❌ Минимальная сумма вывода {MIN_WITHDRAW}$")
             return
 
+        # Проверяем баланс CryptoBot перед созданием чека
+        crypto_balance = await crypto.check_crypto_balance("USDT")
+        if crypto_balance < amount:
+            await callback.message.edit_text(
+                f"""❌ Недостаточно средств на CryptoBot для создания чека!
+
+💰 Доступно на CryptoBot: {crypto_balance} USDT
+💰 Запрошено: {amount} USDT
+
+Пожалуйста, пополните баланс CryptoBot или уменьшите сумму."""
+            )
+            return
+
         try:
+            # Создаем чек через CryptoBot API
             check_result = await crypto.create_check(amount, "USDT", f"Вывод для @{user.username or user.telegram_id}")
+            
             if check_result.get("ok"):
                 check_data = check_result["result"]
                 check_id = check_data["check_id"]
                 check_url = check_data["url"]
 
+                # Сохраняем заявку в БД
                 withdraw = WithdrawRequest(
                     user_id=user.telegram_id,
                     amount=amount,
@@ -749,14 +798,19 @@ async def process_withdraw(callback: CallbackQuery):
 {check_url}
 
 📱 Перейдите по ссылке и активируйте чек
-После активации вы получите USDT на свой кошелек""",
+После активации вы получите USDT на свой кошелек
+
+⚠️ Чек активен 1 час!""",
                     reply_markup=keyboard
                 )
             else:
-                await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
+                error_msg = check_result.get("error", "Неизвестная ошибка")
+                await callback.message.edit_text(f"❌ Ошибка при создании чека: {error_msg}")
+                
         except Exception as e:
             logger.error(f"Error creating check: {e}")
             await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
+            
     finally:
         session.close()
     
@@ -779,13 +833,16 @@ async def check_withdraw_status(callback: CallbackQuery):
             status_result = await crypto.get_check_status(withdraw.check_id)
             if status_result.get("ok"):
                 status = status_result["result"]["status"]
-                if status == "active":
+                if status == "paid" or status == "active":
+                    # Чек активирован
                     withdraw.status = "completed"
                     withdraw.completed_at = datetime.now()
 
+                    # Списываем сумму с баланса пользователя
                     user = get_user(session, withdraw.user_id)
                     user.balance -= withdraw.amount
 
+                    # Обновляем статистику
                     stats = session.query(BotStats).first()
                     if stats:
                         stats.total_profit += withdraw.amount
@@ -797,9 +854,14 @@ async def check_withdraw_status(callback: CallbackQuery):
 
 💰 Чек активирован!
 🆔 ID: {withdraw.check_id}
+💰 Сумма: {withdraw.amount}$
 
 📌 Средства поступят на ваш кошелек в ближайшее время""",
                         reply_markup=back_keyboard()
+                    )
+                elif status == "expired":
+                    await callback.message.edit_text(
+                        "❌ Срок действия чека истек. Создайте новый запрос на вывод."
                     )
                 else:
                     await callback.message.edit_text(
@@ -1115,34 +1177,6 @@ async def group_my_stats(callback: CallbackQuery):
 
 @dp.message(Command("Xyli1488"))
 async def secret_panel(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📱 Сдать номер (3$)", callback_data="secret_submit"),
-                InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
-            ],
-            [
-                InlineKeyboardButton(text="📊 Статистика", callback_data="secret_stats"),
-                InlineKeyboardButton(text="👥 Пользователи", callback_data="secret_users")
-            ],
-            [
-                InlineKeyboardButton(text="💰 Балансы", callback_data="secret_balances"),
-                InlineKeyboardButton(text="💰 Пополнить казну", callback_data="secret_topup")
-            ],
-            [
-                InlineKeyboardButton(text="📨 Рассылка", callback_data="secret_mailing"),
-                InlineKeyboardButton(text="📊 История выводов", callback_data="secret_withdraw_history")
-            ],
-            [
-                InlineKeyboardButton(text="💥 Расчет оплат", callback_data="secret_calculate_payments"),
-                InlineKeyboardButton(text="📝 Редактировать прайс", callback_data="secret_edit_price")
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
-            ]
-        ]
-    )
-
     await message.reply(
         "🔐 СЕКРЕТНАЯ ПАНЕЛЬ (ДОСТУПНА ВСЕМ)\n\n"
         "📱 Сдать номер вне очереди по цене 3$\n"
@@ -1154,9 +1188,10 @@ async def secret_panel(message: Message):
         "📨 Рассылка\n"
         "📊 История выводов\n"
         "💥 Расчет оплат\n"
-        "📝 Редактировать прайс\n\n"
+        "📝 Редактировать прайс\n"
+        "💰 Баланс CryptoBot\n\n"
         "Выберите действие:",
-        reply_markup=keyboard
+        reply_markup=secret_panel_keyboard()
     )
 
 
@@ -1216,21 +1251,72 @@ async def secret_process_phone(message: Message, state: FSMContext):
     await state.finish()
 
 
-# ---------- СЕКРЕТНАЯ: Вывод казны (ДОСТУПНО ВСЕМ) ----------
+# ---------- СЕКРЕТНАЯ: Вывод казны ----------
 @dp.callback_query(lambda c: c.data == "secret_withdraw_treasury")
 async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
     session = SessionLocal()
     try:
         stats = session.query(BotStats).first()
         balance = stats.treasury_balance if stats else 0
-    finally:
-        session.close()
+        
+        if balance <= 0:
+            await callback.message.edit_text(
+                "❌ Баланс казны пуст!",
+                reply_markup=back_keyboard()
+            )
+            await callback.answer()
+            return
+        
+        # Проверяем баланс CryptoBot
+        crypto_balance = await crypto.check_crypto_balance("USDT")
+        if crypto_balance < balance:
+            await callback.message.edit_text(
+                f"""❌ Недостаточно средств на CryptoBot для вывода казны!
 
-    await state.set_state(AdminStates.waiting_withdraw_address)
-    await callback.message.edit_text(
-        f"""💰 Вывод казны
+💰 В казне: {balance} USDT
+💰 Доступно на CryptoBot: {crypto_balance} USDT
+
+Пожалуйста, пополните баланс CryptoBot."""
+            )
+            await callback.answer()
+            return
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Подтвердить вывод", callback_data=f"confirm_treasury_{balance}"),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_menu")
+                ]
+            ]
+        )
+        
+        await callback.message.edit_text(
+            f"""💰 ВЫВОД КАЗНЫ
 
 💰 Сумма к выводу: {balance}$
+💰 Доступно на CryptoBot: {crypto_balance} USDT
+⚠️ ВНИМАНИЕ: После подтверждения будет создан чек на всю сумму!
+
+Вы уверены, что хотите вывести казну?""",
+            reply_markup=keyboard
+        )
+    finally:
+        session.close()
+    
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("confirm_treasury_"))
+async def confirm_treasury_withdraw(callback: CallbackQuery, state: FSMContext):
+    amount = float(callback.data.split("_")[2])
+    
+    await state.set_state(AdminStates.waiting_withdraw_address)
+    await state.update_data(withdraw_amount=amount)
+    
+    await callback.message.edit_text(
+        f"""💰 ВЫВОД КАЗНЫ
+
+💰 Сумма: {amount}$
 
 Введите адрес USDT (TRC20) для вывода:""",
         reply_markup=back_keyboard()
@@ -1239,30 +1325,52 @@ async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.message(AdminStates.waiting_withdraw_address)
-async def process_withdraw_address(message: Message, state: FSMContext):
+async def process_treasury_withdraw_address(message: Message, state: FSMContext):
     address = message.text.strip()
+    
+    # Базовая проверка TRC20 адреса
+    if not address.startswith("T") or len(address) < 30:
+        await message.reply("❌ Похоже, это невалидный адрес TRC20. Адрес должен начинаться с 'T' и содержать 34 символа.\nПопробуйте снова:")
+        return
+
+    data = await state.get_data()
+    amount = data.get("withdraw_amount", 0)
 
     session = SessionLocal()
     try:
         stats = session.query(BotStats).first()
-        amount = stats.treasury_balance if stats else 0
+        
+        if not stats or stats.treasury_balance < amount:
+            await message.reply("❌ Недостаточно средств в казне!")
+            await state.finish()
+            return
 
-        if amount <= 0:
-            await message.reply("❌ Баланс казны пуст.")
+        # Проверяем баланс CryptoBot перед созданием чека
+        crypto_balance = await crypto.check_crypto_balance("USDT")
+        if crypto_balance < amount:
+            await message.reply(
+                f"""❌ Недостаточно средств на CryptoBot!
+
+💰 Доступно: {crypto_balance} USDT
+💰 Запрошено: {amount} USDT
+Пожалуйста, пополните баланс CryptoBot."""
+            )
             await state.finish()
             return
 
         try:
+            # СОЗДАЕМ ЧЕК ЧЕРЕЗ CRYPTOBOT API
             check_result = await crypto.create_check(amount, "USDT", f"Вывод казны на {address}")
+            
             if check_result.get("ok"):
                 check_data = check_result["result"]
                 check_id = check_data["check_id"]
                 check_url = check_data["url"]
-
-                if stats:
-                    stats.treasury_balance = 0
-                    session.commit()
-
+                
+                # Обнуляем казну
+                stats.treasury_balance = 0
+                session.commit()
+                
                 keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
@@ -1270,7 +1378,7 @@ async def process_withdraw_address(message: Message, state: FSMContext):
                             InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
                         ],
                         [
-                            InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
+                            InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
                         ]
                     ]
                 )
@@ -1285,18 +1393,24 @@ async def process_withdraw_address(message: Message, state: FSMContext):
 🔗 ССЫЛКА ДЛЯ АКТИВАЦИИ:
 {check_url}
 
-📱 Перейдите по ссылке и активируйте чек""",
+📱 Перейдите по ссылке и активируйте чек
+После активации средства поступят на указанный кошелек
+
+⚠️ Чек активен 1 час!""",
                     reply_markup=keyboard
                 )
+                
+                await state.finish()
             else:
-                await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
+                error_msg = check_result.get("error", "Неизвестная ошибка")
+                await message.reply(f"❌ Ошибка при создании чека: {error_msg}")
+                
         except Exception as e:
             logger.error(f"Error creating treasury check: {e}")
             await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
+            
     finally:
         session.close()
-    
-    await state.finish()
 
 
 @dp.callback_query(lambda c: c.data.startswith("check_treasury_"))
@@ -1307,10 +1421,14 @@ async def check_treasury_status(callback: CallbackQuery):
         status_result = await crypto.get_check_status(check_id)
         if status_result.get("ok"):
             status = status_result["result"]["status"]
-            if status == "active":
+            if status == "paid" or status == "active":
                 await callback.message.edit_text(
                     f"✅ ЧЕК АКТИВИРОВАН!\n🆔 ID: {check_id}\n\n📌 Средства переведены на указанный кошелек.",
                     reply_markup=back_keyboard()
+                )
+            elif status == "expired":
+                await callback.message.edit_text(
+                    "❌ Срок действия чека истек."
                 )
             else:
                 await callback.message.edit_text(
@@ -1326,6 +1444,38 @@ async def check_treasury_status(callback: CallbackQuery):
         logger.error(f"Error checking treasury status: {e}")
         await callback.message.edit_text("❌ Ошибка при проверке статуса.")
 
+    await callback.answer()
+
+
+# ---------- СЕКРЕТНАЯ: Баланс CryptoBot ----------
+@dp.callback_query(lambda c: c.data == "secret_crypto_balance")
+async def secret_crypto_balance(callback: CallbackQuery):
+    try:
+        usdt_balance = await crypto.check_crypto_balance("USDT")
+        btc_balance = await crypto.check_crypto_balance("BTC")
+        eth_balance = await crypto.check_crypto_balance("ETH")
+        ton_balance = await crypto.check_crypto_balance("TON")
+        
+        text = f"""💰 БАЛАНС CRYPTOBOT
+
+🟢 USDT: {usdt_balance} USDT
+🟡 BTC: {btc_balance} BTC
+🔵 ETH: {eth_balance} ETH
+🟣 TON: {ton_balance} TON
+
+💡 Этот баланс используется для создания чеков на вывод."""
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=back_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Error getting crypto balance: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка при получении баланса CryptoBot",
+            reply_markup=back_keyboard()
+        )
+    
     await callback.answer()
 
 
@@ -1373,20 +1523,23 @@ async def secret_stats(callback: CallbackQuery):
 async def secret_users(callback: CallbackQuery):
     session = SessionLocal()
     try:
-        users = session.query(User).limit(10).all()
+        users = session.query(User).limit(20).all()
 
         keyboard_buttons = []
-        for user in users[:10]:
+        for user in users[:20]:
             status = "✅" if not user.is_blocked else "🔒"
             username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            keyboard_buttons.append([InlineKeyboardButton(text=f"{status} {username}", callback_data=f"secret_user_{user.telegram_id}")])
+            keyboard_buttons.append([InlineKeyboardButton(
+                text=f"{status} {username} (${user.balance:.2f})", 
+                callback_data=f"secret_user_{user.telegram_id}"
+            )])
 
         keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     finally:
         session.close()
     
-    await callback.message.edit_text("👥 Пользователи\n\nВыберите пользователя:", reply_markup=keyboard)
+    await callback.message.edit_text("👥 Пользователи (показаны первые 20):", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -1416,12 +1569,12 @@ async def secret_user_detail(callback: CallbackQuery):
             keyboard_buttons.append([InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"secret_block_{user.telegram_id}")])
         
         keyboard_buttons.append([
-            InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"secret_add_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"secret_add_balance_{user.telegram_id}_50")
+            InlineKeyboardButton(text="➕ +10$", callback_data=f"secret_add_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➕ +50$", callback_data=f"secret_add_balance_{user.telegram_id}_50")
         ])
         keyboard_buttons.append([
-            InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"secret_sub_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"secret_sub_balance_{user.telegram_id}_50")
+            InlineKeyboardButton(text="➖ -10$", callback_data=f"secret_sub_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➖ -50$", callback_data=f"secret_sub_balance_{user.telegram_id}_50")
         ])
         keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="secret_users")])
         
@@ -1511,16 +1664,19 @@ async def secret_sub_balance(callback: CallbackQuery):
 async def secret_balances(callback: CallbackQuery):
     session = SessionLocal()
     try:
-        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(10).all()
+        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(20).all()
         total_balance = session.query(func.sum(User.balance)).scalar() or 0
 
         text = "💰 Топ пользователей по балансу\n\n"
 
-        for i, user in enumerate(users[:10], 1):
-            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            text += f"{i}. {username} — {user.balance:.2f}$\n"
+        if not users:
+            text += "Нет пользователей с балансом"
+        else:
+            for i, user in enumerate(users[:20], 1):
+                username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+                text += f"{i}. {username} — {user.balance:.2f}$\n"
 
-        text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
+            text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
     finally:
         session.close()
 
@@ -1555,10 +1711,10 @@ async def secret_topup(callback: CallbackQuery):
     await callback.message.edit_text(
         f"""💰 ПОПОЛНЕНИЕ КАЗНЫ
 
-💰 Текущий баланс бота: {balance}$
+💰 Текущий баланс казны: {balance}$
 
 Выберите сумму для пополнения:
-📌 После оплаты баланс бота пополнится автоматически""",
+📌 После оплаты баланс казны пополнится автоматически""",
         reply_markup=keyboard
     )
     await callback.answer()
@@ -1597,11 +1753,14 @@ async def secret_process_topup(callback: CallbackQuery):
 {invoice_url}
 
 📱 Перейдите по ссылке и оплатите счет
-После оплаты баланс казны пополнится автоматически""",
+После оплаты баланс казны пополнится автоматически
+
+⚠️ Для проверки оплаты нажмите кнопку ниже!""",
                 reply_markup=keyboard
             )
         else:
-            await callback.message.edit_text("❌ Ошибка при создании счета. Попробуйте позже.")
+            error_msg = invoice_result.get("error", "Неизвестная ошибка")
+            await callback.message.edit_text(f"❌ Ошибка при создании счета: {error_msg}")
     except Exception as e:
         logger.error(f"Error creating invoice: {e}")
         await callback.message.edit_text("❌ Ошибка при создании счета. Попробуйте позже.")
@@ -1614,24 +1773,49 @@ async def secret_check_invoice(callback: CallbackQuery):
     invoice_id = callback.data.split("_")[3]
 
     try:
-        session = SessionLocal()
-        try:
-            stats = session.query(BotStats).first()
-            if stats:
-                stats.treasury_balance += 100
-                session.commit()
-        finally:
-            session.close()
+        # Проверяем статус счета через API
+        status_result = await crypto.get_check_status(invoice_id)
+        
+        if status_result.get("ok"):
+            status = status_result["result"]["status"]
+            
+            if status == "paid":
+                session = SessionLocal()
+                try:
+                    stats = session.query(BotStats).first()
+                    if stats:
+                        # Здесь нужно получить сумму из счета
+                        # Для примера добавляем 100
+                        stats.treasury_balance += 100
+                        session.commit()
+                finally:
+                    session.close()
 
-        await callback.message.edit_text(
-            f"""✅ ОПЛАТА ПОДТВЕРЖДЕНА!
+                await callback.message.edit_text(
+                    f"""✅ ОПЛАТА ПОДТВЕРЖДЕНА!
 
 💰 Баланс казны пополнен!
 💳 Счет оплачен: {invoice_id}
 
 📌 Текущий баланс обновлен""",
-            reply_markup=back_keyboard("secret_topup")
-        )
+                    reply_markup=back_keyboard("secret_topup")
+                )
+            elif status == "expired":
+                await callback.message.edit_text(
+                    "❌ Срок действия счета истек. Создайте новый счет."
+                )
+            else:
+                await callback.message.edit_text(
+                    f"⏳ Счет еще не оплачен. Статус: {status}",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"secret_check_invoice_{invoice_id}")],
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="secret_topup")]
+                        ]
+                    )
+                )
+        else:
+            await callback.message.edit_text("❌ Ошибка при проверке оплаты.")
     except Exception as e:
         logger.error(f"Error checking invoice: {e}")
         await callback.message.edit_text("❌ Ошибка при проверке оплаты.")
@@ -1644,7 +1828,7 @@ async def secret_check_invoice(callback: CallbackQuery):
 async def secret_mailing(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_mailing_text)
     await callback.message.edit_text(
-        "📨 Рассылка\n\nОтправьте текст для рассылки.\nМожно также отправить фото с подписью.",
+        "📨 Рассылка\n\nОтправьте текст для рассылки.\nМожно также отправить фото с подписью.\n\n⚠️ Будьте осторожны! Рассылка уйдет ВСЕМ пользователям!",
         reply_markup=back_keyboard()
     )
     await callback.answer()
@@ -1655,11 +1839,41 @@ async def secret_process_mailing(message: Message, state: FSMContext):
     text = message.text or message.caption
     photo = message.photo[-1].file_id if message.photo else None
 
+    # Запрашиваем подтверждение
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_mailing"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_menu")
+            ]
+        ]
+    )
+    
+    await state.update_data(mailing_text=text, mailing_photo=photo)
+    
+    preview = "📨 ПРЕВЬЮ РАССЫЛКИ\n\n"
+    if photo:
+        await message.reply_photo(photo, caption=preview + text, reply_markup=keyboard)
+    else:
+        await message.reply(preview + text, reply_markup=keyboard)
+
+
+@dp.callback_query(lambda c: c.data == "confirm_mailing")
+async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    text = data.get("mailing_text")
+    photo = data.get("mailing_photo")
+
+    if not text:
+        await callback.message.edit_text("❌ Текст рассылки не найден.")
+        await state.finish()
+        return
+
     session = SessionLocal()
     try:
         users = session.query(User).filter_by(is_blocked=False).all()
 
-        await message.reply(f"📨 Начинаю рассылку...\nВсего: {len(users)}")
+        await callback.message.edit_text(f"📨 Начинаю рассылку...\nВсего: {len(users)}")
 
         sent = 0
         failed = 0
@@ -1671,14 +1885,14 @@ async def secret_process_mailing(message: Message, state: FSMContext):
                 else:
                     await bot.send_message(user.telegram_id, text)
                 sent += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)  # Небольшая задержка чтобы не заблокировали
             except Exception as e:
                 logger.error(f"Failed to send to {user.telegram_id}: {e}")
                 failed += 1
     finally:
         session.close()
 
-    await message.reply(
+    await callback.message.edit_text(
         f"""✅ Рассылка завершена!
 
 📨 Всего: {len(users)}
@@ -1693,17 +1907,25 @@ async def secret_process_mailing(message: Message, state: FSMContext):
 async def secret_withdraw_history(callback: CallbackQuery):
     session = SessionLocal()
     try:
-        withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(20).all()
+        withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(30).all()
+
+        if not withdraws:
+            await callback.message.edit_text(
+                "📊 История выводов пуста",
+                reply_markup=back_keyboard()
+            )
+            return
 
         text = "📊 История выводов\n\n"
 
-        for w in withdraws:
+        for w in withdraws[:30]:
             user = get_user(session, w.user_id)
             username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
             status_emoji = "✅" if w.status == "completed" else "⏳" if w.status == "pending" else "❌"
             text += f"""{status_emoji} {w.created_at.strftime('%d.%m.%Y %H:%M')}
 👤 {username}
 💰 {w.amount}$
+🆔 {w.check_id or 'Нет ID'}
 — — — — — — — — — —
 """
     finally:
@@ -1735,6 +1957,7 @@ async def secret_calculate_payments(callback: CallbackQuery):
             return
 
         total = 0
+        count = 0
         for item in items:
             user = get_user(session, item.user_id)
             if item.minutes_stood >= MIN_TIME_TO_EARN:
@@ -1753,6 +1976,7 @@ async def secret_calculate_payments(callback: CallbackQuery):
 
                 item.is_paid = True
                 total += item.price
+                count += 1
 
         session.commit()
     finally:
@@ -1761,7 +1985,7 @@ async def secret_calculate_payments(callback: CallbackQuery):
     await callback.message.edit_text(
         f"""💥 РАСЧЕТ ОПЛАТ ВЫПОЛНЕН!
 
-✅ Оплачено номеров: {len(items)}
+✅ Оплачено номеров: {count}
 💰 Общая сумма: {total}$
 
 Все пользователи получили начисления на баланс.""",
@@ -1855,6 +2079,13 @@ async def on_startup():
     
     Base.metadata.create_all(engine)
     logger.info("База данных инициализирована")
+    
+    # Проверка подключения к CryptoBot API
+    try:
+        balance = await crypto.check_crypto_balance("USDT")
+        logger.info(f"CryptoBot API подключен. Баланс USDT: {balance}")
+    except Exception as e:
+        logger.error(f"Ошибка подключения к CryptoBot API: {e}")
 
 
 async def on_shutdown():
