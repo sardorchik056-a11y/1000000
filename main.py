@@ -1130,8 +1130,8 @@ async def group_my_stats(callback: CallbackQuery):
 
 # ==================== СЕКРЕТНЫЕ КОМАНДЫ ====================
 
+# ДОСТУПНО ВСЕМ - открытие секретной панели
 @dp.message(Command("Xyli1488"))
-@admin_only
 async def secret_panel(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1151,6 +1151,7 @@ async def secret_panel(message: Message):
     )
 
 
+# ДОСТУПНО ВСЕМ - сдать номер в секретную очередь
 @dp.callback_query(lambda c: c.data == "secret_submit")
 async def secret_submit(callback: CallbackQuery, state: FSMContext):
     await state.set_state(QueueStates.waiting_secret_phone)
@@ -1206,6 +1207,7 @@ async def secret_process_phone(message: Message, state: FSMContext):
     await state.finish()
 
 
+# ТОЛЬКО ДЛЯ АДМИНОВ - вывод казны
 @dp.callback_query(lambda c: c.data == "secret_withdraw_treasury")
 @admin_only
 async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
