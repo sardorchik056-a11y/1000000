@@ -1905,9 +1905,28 @@ async def update_bot_stats():
     logger.info("Bot stats updated")
 
 
-scheduler.add_job(update_daily_stats, CronTrigger(hour=0, minute=0))
-scheduler.add_job(update_bot_stats, CronTrigger(hour=0, minute=5))
-scheduler.start()
+# ==================== СОБЫТИЯ ЗАПУСКА/ОСТАНОВКИ ====================
+
+async def on_startup():
+    """Действия при запуске бота"""
+    # Добавляем задачи в планировщик
+    scheduler.add_job(update_daily_stats, CronTrigger(hour=0, minute=0))
+    scheduler.add_job(update_bot_stats, CronTrigger(hour=0, minute=5))
+    
+    # Запускаем планировщик
+    scheduler.start()
+    logger.info("Планировщик запущен")
+    
+    # Инициализация базы данных
+    Base.metadata.create_all(engine)
+    logger.info("База данных инициализирована")
+
+
+async def on_shutdown():
+    """Действия при остановке бота"""
+    scheduler.shutdown()
+    logger.info("Планировщик остановлен")
+
 
 # ==================== ЗАПУСК ====================
 
@@ -1927,18 +1946,16 @@ async def unknown_message(message: Message):
 
 
 async def main():
-    try:
-        Base.metadata.create_all(engine)
-        logger.info("База данных инициализирована")
-        await dp.start_polling(bot, skip_updates=True)
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
+    # Регистрируем события
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    # Запускаем бота
+    await dp.start_polling(bot, skip_updates=True)
 
 
 if __name__ == "__main__":
     try:
-        Base.metadata.create_all(engine)
-        logger.info("База данных инициализирована")
         asyncio.run(main())
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
