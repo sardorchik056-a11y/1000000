@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)  # <-- ИСПРАВЛЕНО
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 class User(Base):
@@ -228,9 +228,11 @@ def get_status_emoji(status: str) -> str:
 
 
 def back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]
+        ]
+    )
 
 
 def admin_only(func):
@@ -287,20 +289,21 @@ crypto = CryptoBotAPI(CRYPTO_TOKEN)
 # ==================== КЛАВИАТУРЫ ====================
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="📱 Сдать номер", callback_data="submit_number"),
-        InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 Сдать номер", callback_data="submit_number"),
+                InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
+            ],
+            [
+                InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
+                InlineKeyboardButton(text="🆘 Тех поддержка", callback_data="support")
+            ]
+        ]
     )
-    keyboard.add(
-        InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-        InlineKeyboardButton(text="🆘 Тех поддержка", callback_data="support")
-    )
-    return keyboard
 
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=2)
     buttons = [
         ("📊 Статистика дня", "admin_stats_day"),
         ("📊 Статистика недели", "admin_stats_week"),
@@ -315,39 +318,56 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
         ("💥 Расчет оплат", "admin_calculate_payments"),
         ("🔙 Закрыть", "back_to_menu")
     ]
-    for text, callback in buttons:
-        keyboard.add(InlineKeyboardButton(text=text, callback_data=callback))
-    return keyboard
+    
+    keyboard_buttons = []
+    row = []
+    for i, (text, callback) in enumerate(buttons):
+        row.append(InlineKeyboardButton(text=text, callback_data=callback))
+        if len(row) == 2 or i == len(buttons) - 1:
+            keyboard_buttons.append(row)
+            row = []
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
 
 def group_panel_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="📱 Взять номер", callback_data="group_take_number"),
-        InlineKeyboardButton(text="📊 Моя статистика", callback_data="group_my_stats")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 Взять номер", callback_data="group_take_number"),
+                InlineKeyboardButton(text="📊 Моя статистика", callback_data="group_my_stats")
+            ]
+        ]
     )
-    return keyboard
 
 
 def queue_type_keyboard(phone: str) -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="⚡ Вне очереди (1.5$)", callback_data=f"queue_fast_{phone}"),
-        InlineKeyboardButton(text="💰 Обычная (3$)", callback_data=f"queue_normal_{phone}")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚡ Вне очереди (1.5$)", callback_data=f"queue_fast_{phone}"),
+                InlineKeyboardButton(text="💰 Обычная (3$)", callback_data=f"queue_normal_{phone}")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+            ]
+        ]
     )
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu"))
-    return keyboard
 
 
 def connect_method_keyboard() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Перенос", callback_data="connect_transfer"),
-        InlineKeyboardButton(text="🔗 Связ", callback_data="connect_link"),
-        InlineKeyboardButton(text="📱 Кюар", callback_data="connect_qr")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Перенос", callback_data="connect_transfer"),
+                InlineKeyboardButton(text="🔗 Связ", callback_data="connect_link")
+            ],
+            [
+                InlineKeyboardButton(text="📱 Кюар", callback_data="connect_qr"),
+                InlineKeyboardButton(text="🔙 Назад", callback_data="group_back")
+            ]
+        ]
     )
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="group_back"))
-    return keyboard
 
 
 # ==================== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЯ ====================
@@ -422,14 +442,17 @@ async def profile_callback(callback: CallbackQuery):
 💰 Баланс: {user.balance}$
 💬 Дата регистрации: {user.registered_at.strftime('%d.%m.%Y')}"""
 
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            InlineKeyboardButton(text="📊 Статистика", callback_data="stats_menu"),
-            InlineKeyboardButton(text="💸 Вывод", callback_data="withdraw_menu")
-        )
-        keyboard.add(
-            InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📊 Статистика", callback_data="stats_menu"),
+                    InlineKeyboardButton(text="💸 Вывод", callback_data="withdraw_menu")
+                ],
+                [
+                    InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
+                    InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+                ]
+            ]
         )
     finally:
         session.close()
@@ -472,10 +495,13 @@ async def my_queue_callback(callback: CallbackQuery):
     finally:
         session.close()
 
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="my_queue"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="my_queue"),
+                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+            ]
+        ]
     )
 
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -484,12 +510,17 @@ async def my_queue_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "stats_menu")
 async def stats_menu(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="📅 Сегодня", callback_data="stats_today"),
-        InlineKeyboardButton(text="🕐 За всё время", callback_data="stats_alltime")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Сегодня", callback_data="stats_today"),
+                InlineKeyboardButton(text="🕐 За всё время", callback_data="stats_alltime")
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")
+            ]
+        ]
     )
-    keyboard.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="profile"))
 
     await callback.message.edit_text(
         f"💬 Статистика\n\n🏷 Ваш ID: {callback.from_user.id}\n\nВыберите период ⬇️",
@@ -619,9 +650,13 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
 📊 Ваша позиция: {position}/{total}
 
 ⏳ Ожидайте пока админ возьмет ваш номер""",
-            reply_markup=InlineKeyboardMarkup(row_width=2).add(
-                InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-                InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
+                        InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
+                    ]
+                ]
             )
         )
     finally:
@@ -639,16 +674,24 @@ async def withdraw_menu(callback: CallbackQuery):
     try:
         user = get_user(session, callback.from_user.id)
 
-        keyboard = InlineKeyboardMarkup(row_width=2)
+        buttons = []
         amounts = [10, 25, 50, 100]
+        row = []
         for amount in amounts:
             if user.balance >= amount:
-                keyboard.insert(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"withdraw_{amount}"))
+                row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"withdraw_{amount}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+        if row:
+            buttons.append(row)
 
         if user.balance >= MIN_WITHDRAW:
-            keyboard.add(InlineKeyboardButton(text=f"💰 Весь баланс ({int(user.balance)}$)", callback_data=f"withdraw_{int(user.balance)}"))
+            buttons.append([InlineKeyboardButton(text=f"💰 Весь баланс ({int(user.balance)}$)", callback_data=f"withdraw_{int(user.balance)}")])
 
-        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="profile"))
+        buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="profile")])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         await callback.message.edit_text(
             f"""💸 ВЫВОД СРЕДСТВ
@@ -697,12 +740,17 @@ async def process_withdraw(callback: CallbackQuery):
                 session.add(withdraw)
                 session.commit()
 
-                keyboard = InlineKeyboardMarkup(row_width=2)
-                keyboard.add(
-                    InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                    InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_withdraw_{withdraw.id}")
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
+                            InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_withdraw_{withdraw.id}")
+                        ],
+                        [
+                            InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
+                        ]
+                    ]
                 )
-                keyboard.add(InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu"))
 
                 await callback.message.edit_text(
                     f"""🧾 ЧЕК НА ВЫВОД
@@ -769,9 +817,11 @@ async def check_withdraw_status(callback: CallbackQuery):
                 else:
                     await callback.message.edit_text(
                         f"⏳ Чек еще не активирован. Статус: {status}",
-                        reply_markup=InlineKeyboardMarkup(row_width=1).add(
-                            InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_withdraw_{withdraw.id}"),
-                            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_withdraw_{withdraw.id}")],
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+                            ]
                         )
                     )
         except Exception as e:
@@ -894,11 +944,14 @@ async def process_code(message: Message, state: FSMContext):
             user.daily_taken = 1
             user.daily_date = today
 
-        keyboard = InlineKeyboardMarkup(row_width=3)
-        keyboard.add(
-            InlineKeyboardButton(text="✅ Встал", callback_data=f"stood_{queue_item.id}"),
-            InlineKeyboardButton(text="🔄 Повтор", callback_data=f"retry_{queue_item.id}"),
-            InlineKeyboardButton(text="❌ Ошибка", callback_data=f"failed_{queue_item.id}")
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Встал", callback_data=f"stood_{queue_item.id}"),
+                    InlineKeyboardButton(text="🔄 Повтор", callback_data=f"retry_{queue_item.id}"),
+                    InlineKeyboardButton(text="❌ Ошибка", callback_data=f"failed_{queue_item.id}")
+                ]
+            ]
         )
 
         await bot.send_message(
@@ -1080,12 +1133,17 @@ async def group_my_stats(callback: CallbackQuery):
 @dp.message(Command("Xyli1488"))
 @admin_only
 async def secret_panel(message: Message):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="📱 Сдать номер (3$)", callback_data="secret_submit"),
-        InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 Сдать номер (3$)", callback_data="secret_submit"),
+                InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
+            ]
+        ]
     )
-    keyboard.add(InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu"))
 
     await message.reply(
         "🔐 СЕКРЕТНАЯ ПАНЕЛЬ\n\n📱 Сдать номер вне очереди по цене 3$\n💰 Вывести казну\n\nВыберите действие:",
@@ -1196,12 +1254,17 @@ async def process_withdraw_address(message: Message, state: FSMContext):
                     stats.treasury_balance = 0
                     session.commit()
 
-                keyboard = InlineKeyboardMarkup(row_width=2)
-                keyboard.add(
-                    InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                    InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
+                            InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
+                        ],
+                        [
+                            InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
+                        ]
+                    ]
                 )
-                keyboard.add(InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu"))
 
                 await message.reply(
                     f"""🧾 ЧЕК НА ВЫВОД КАЗНЫ
@@ -1243,9 +1306,11 @@ async def check_treasury_status(callback: CallbackQuery):
             else:
                 await callback.message.edit_text(
                     f"⏳ Чек еще не активирован. Статус: {status}",
-                    reply_markup=InlineKeyboardMarkup(row_width=1).add(
-                        InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_treasury_{check_id}"),
-                        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_treasury_{check_id}")],
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+                        ]
                     )
                 )
     except Exception as e:
@@ -1334,10 +1399,11 @@ async def admin_stats_day(callback: CallbackQuery):
     finally:
         session.close()
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_day"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_day")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]
     )
 
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -1416,10 +1482,11 @@ async def admin_stats_all(callback: CallbackQuery):
     finally:
         session.close()
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_all"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_all")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]
     )
 
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -1455,13 +1522,14 @@ async def admin_users(callback: CallbackQuery):
     try:
         users = session.query(User).limit(10).all()
 
-        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard_buttons = []
         for user in users[:10]:
             status = "✅" if not user.is_blocked else "🔒"
             username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            keyboard.add(InlineKeyboardButton(text=f"{status} {username}", callback_data=f"admin_user_{user.telegram_id}"))
+            keyboard_buttons.append([InlineKeyboardButton(text=f"{status} {username}", callback_data=f"admin_user_{user.telegram_id}")])
 
-        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     finally:
         session.close()
     
@@ -1489,16 +1557,18 @@ async def admin_user_detail(callback: CallbackQuery):
 ✅ Отстояло: {user.total_stood}
 ❌ Слетело: {user.total_failed}"""
 
-        keyboard = InlineKeyboardMarkup(row_width=2)
+        keyboard_buttons = []
         if user.is_blocked:
-            keyboard.add(InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"admin_unblock_{user.telegram_id}"))
+            keyboard_buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"admin_unblock_{user.telegram_id}")])
         else:
-            keyboard.add(InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_{user.telegram_id}"))
-
-        keyboard.add(
+            keyboard_buttons.append([InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_{user.telegram_id}")])
+        
+        keyboard_buttons.append([
             InlineKeyboardButton(text="💰 Баланс", callback_data=f"admin_balance_{user.telegram_id}"),
             InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")
-        )
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     finally:
         session.close()
     
@@ -1549,16 +1619,21 @@ async def admin_balance_user(callback: CallbackQuery):
     try:
         user = get_user(session, telegram_id)
 
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"admin_add_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"admin_add_balance_{user.telegram_id}_50")
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"admin_add_balance_{user.telegram_id}_10"),
+                    InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"admin_add_balance_{user.telegram_id}_50")
+                ],
+                [
+                    InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"admin_sub_balance_{user.telegram_id}_10"),
+                    InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"admin_sub_balance_{user.telegram_id}_50")
+                ],
+                [
+                    InlineKeyboardButton(text="🔙 Назад", callback_data=f"admin_user_{user.telegram_id}")
+                ]
+            ]
         )
-        keyboard.add(
-            InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"admin_sub_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"admin_sub_balance_{user.telegram_id}_50")
-        )
-        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"admin_user_{user.telegram_id}"))
     finally:
         session.close()
 
@@ -1615,11 +1690,19 @@ async def admin_sub_balance(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "admin_topup")
 @admin_only
 async def admin_topup(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(row_width=3)
     amounts = [10, 25, 50, 100, 500, 1000]
+    keyboard_buttons = []
+    row = []
     for amount in amounts:
-        keyboard.insert(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"topup_{amount}"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+        row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"topup_{amount}"))
+        if len(row) == 3:
+            keyboard_buttons.append(row)
+            row = []
+    if row:
+        keyboard_buttons.append(row)
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
     session = SessionLocal()
     try:
@@ -1652,12 +1735,17 @@ async def process_topup(callback: CallbackQuery):
             invoice_id = invoice_data["invoice_id"]
             invoice_url = invoice_data["url"]
 
-            keyboard = InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                InlineKeyboardButton(text="🔗 Оплатить счет", url=invoice_url),
-                InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_invoice_{invoice_id}")
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🔗 Оплатить счет", url=invoice_url),
+                        InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_invoice_{invoice_id}")
+                    ],
+                    [
+                        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_topup")
+                    ]
+                ]
             )
-            keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_topup"))
 
             await callback.message.edit_text(
                 f"""💳 СЧЕТ НА ОПЛАТУ
@@ -1816,10 +1904,11 @@ async def admin_withdraw_history(callback: CallbackQuery):
     finally:
         session.close()
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_history"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_history")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]
     )
 
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -1854,10 +1943,11 @@ async def admin_withdraw_requests(callback: CallbackQuery):
     finally:
         session.close()
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_requests"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_requests")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]
     )
 
     await callback.message.edit_text(text, reply_markup=keyboard)
