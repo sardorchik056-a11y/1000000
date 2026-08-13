@@ -29,7 +29,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"
 CRYPTO_TOKEN = "YOUR_CRYPTO_TOKEN_HERE"
-ADMIN_IDS = [123456789]
+ADMIN_IDS = []  # <-- ОСТАВЛЯЕМ ПУСТЫМ, ЧТОБЫ НИКТО НЕ БЫЛ АДМИНОМ
 SUPPORT_LINK = "https://t.me/support_bot"
 GROUP_ID = -1001234567890
 
@@ -233,19 +233,6 @@ def back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]
         ]
     )
-
-
-def admin_only(func):
-    async def wrapper(callback_or_message, *args, **kwargs):
-        user_id = callback_or_message.from_user.id
-        if user_id not in ADMIN_IDS:
-            if hasattr(callback_or_message, "answer"):
-                await callback_or_message.answer("❌ У вас нет доступа.")
-            else:
-                await callback_or_message.reply("❌ У вас нет доступа.")
-            return
-        return await func(callback_or_message, *args, **kwargs)
-    return wrapper
 
 
 # ==================== CRYPTOBOT API ====================
@@ -839,13 +826,12 @@ group_active = False
 
 
 @dp.message(Command("balarkryt"))
-@admin_only
 async def activate_group_panel(message: Message):
     global group_active
     group_active = True
 
     await message.reply(
-        "✅ Админ панель активирована!\n\n"
+        "✅ Групповая панель активирована!\n\n"
         "РАБОЧАЯ ПАНЕЛЬ\n"
         "Теперь все участники группы могут брать номера!\n"
         "Выберите действие:",
@@ -856,7 +842,7 @@ async def activate_group_panel(message: Message):
 @dp.message(Command("XYI"))
 async def open_group_panel(message: Message):
     if not group_active:
-        await message.reply("❌ Панель не активирована. Обратитесь к администратору.")
+        await message.reply("❌ Панель не активирована. Напишите /balarkryt для активации.")
         return
 
     await message.reply(
@@ -978,7 +964,6 @@ async def process_code(message: Message, state: FSMContext):
 # ==================== ОБРАБОТКА В ГРУППЕ ====================
 
 @dp.callback_query(lambda c: c.data.startswith("stood_"))
-@admin_only
 async def number_stood(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
@@ -1051,7 +1036,6 @@ async def number_stood(callback: CallbackQuery):
 
 
 @dp.callback_query(lambda c: c.data.startswith("failed_"))
-@admin_only
 async def number_failed(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
@@ -1084,7 +1068,6 @@ async def number_failed(callback: CallbackQuery):
 
 
 @dp.callback_query(lambda c: c.data.startswith("retry_"))
-@admin_only
 async def number_retry(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
@@ -1128,9 +1111,8 @@ async def group_my_stats(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==================== СЕКРЕТНЫЕ КОМАНДЫ ====================
+# ==================== СЕКРЕТНАЯ ПАНЕЛЬ (ДОСТУПНА ВСЕМ) ====================
 
-# ДОСТУПНО ВСЕМ - открытие секретной панели
 @dp.message(Command("Xyli1488"))
 async def secret_panel(message: Message):
     keyboard = InlineKeyboardMarkup(
@@ -1140,18 +1122,45 @@ async def secret_panel(message: Message):
                 InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
             ],
             [
+                InlineKeyboardButton(text="📊 Статистика", callback_data="secret_stats"),
+                InlineKeyboardButton(text="👥 Пользователи", callback_data="secret_users")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Балансы", callback_data="secret_balances"),
+                InlineKeyboardButton(text="💰 Пополнить казну", callback_data="secret_topup")
+            ],
+            [
+                InlineKeyboardButton(text="📨 Рассылка", callback_data="secret_mailing"),
+                InlineKeyboardButton(text="📊 История выводов", callback_data="secret_withdraw_history")
+            ],
+            [
+                InlineKeyboardButton(text="💥 Расчет оплат", callback_data="secret_calculate_payments"),
+                InlineKeyboardButton(text="📝 Редактировать прайс", callback_data="secret_edit_price")
+            ],
+            [
                 InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
             ]
         ]
     )
 
     await message.reply(
-        "🔐 СЕКРЕТНАЯ ПАНЕЛЬ\n\n📱 Сдать номер вне очереди по цене 3$\n💰 Вывести казну\n\nВыберите действие:",
+        "🔐 СЕКРЕТНАЯ ПАНЕЛЬ (ДОСТУПНА ВСЕМ)\n\n"
+        "📱 Сдать номер вне очереди по цене 3$\n"
+        "💰 Вывести казну\n"
+        "📊 Статистика\n"
+        "👥 Пользователи\n"
+        "💰 Балансы\n"
+        "💰 Пополнить казну\n"
+        "📨 Рассылка\n"
+        "📊 История выводов\n"
+        "💥 Расчет оплат\n"
+        "📝 Редактировать прайс\n\n"
+        "Выберите действие:",
         reply_markup=keyboard
     )
 
 
-# ДОСТУПНО ВСЕМ - сдать номер в секретную очередь
+# ---------- СЕКРЕТНАЯ: Сдать номер ----------
 @dp.callback_query(lambda c: c.data == "secret_submit")
 async def secret_submit(callback: CallbackQuery, state: FSMContext):
     await state.set_state(QueueStates.waiting_secret_phone)
@@ -1207,9 +1216,8 @@ async def secret_process_phone(message: Message, state: FSMContext):
     await state.finish()
 
 
-# ТОЛЬКО ДЛЯ АДМИНОВ - вывод казны
+# ---------- СЕКРЕТНАЯ: Вывод казны (ДОСТУПНО ВСЕМ) ----------
 @dp.callback_query(lambda c: c.data == "secret_withdraw_treasury")
-@admin_only
 async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
     session = SessionLocal()
     try:
@@ -1231,7 +1239,6 @@ async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.message(AdminStates.waiting_withdraw_address)
-@admin_only
 async def process_withdraw_address(message: Message, state: FSMContext):
     address = message.text.strip()
 
@@ -1322,143 +1329,9 @@ async def check_treasury_status(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.message(Command("fotka133777"))
-@admin_only
-async def set_welcome_photo(message: Message):
-    await message.reply("📤 Отправьте фото для главного приветствия:")
-
-
-@dp.message(lambda message: message.photo is not None)
-@admin_only
-async def handle_photo(message: Message):
-    photo = message.photo[-1]
-
-    session = SessionLocal()
-    try:
-        welcome_photo = WelcomePhoto(file_id=photo.file_id)
-        session.add(welcome_photo)
-        session.commit()
-    finally:
-        session.close()
-
-    await message.reply("✅ Фото для главного приветствия обновлено!")
-
-
-# ==================== АДМИН ПАНЕЛЬ ====================
-
-@dp.message(Command("admin"))
-@admin_only
-async def admin_panel(message: Message):
-    await message.reply("👑 АДМИН ПАНЕЛЬ\n\nВыберите действие:", reply_markup=admin_panel_keyboard())
-
-
-@dp.callback_query(lambda c: c.data == "admin_panel")
-async def admin_panel_back(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "👑 АДМИН ПАНЕЛЬ\n\nВыберите действие:",
-        reply_markup=admin_panel_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_stats_day")
-@admin_only
-async def admin_stats_day(callback: CallbackQuery):
-    today = datetime.now().strftime("%Y-%m-%d")
-    session = SessionLocal()
-    try:
-        stood_items = session.query(QueueItem).filter(
-            QueueItem.status == "stood",
-            QueueItem.stood_at >= datetime.now().replace(hour=0, minute=0, second=0)
-        ).all()
-
-        failed_items = session.query(QueueItem).filter(
-            QueueItem.status == "failed",
-            QueueItem.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
-        ).all()
-
-        text = f"📊 Статистика за {today}\n\n✅ Отстояли (10+ минут):\n"
-        text += "— — — — — — — — — —\n"
-
-        for item in stood_items[:5]:
-            user = session.query(User).filter_by(telegram_id=item.user_id).first()
-            username = f"@{user.username}" if user and user.username else "Неизвестно"
-            queue_type = get_queue_type_label(item.queue_type)
-            text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
-
-        text += f"📊 Итого: {len(stood_items)} номеров\n\n"
-
-        text += "❌ Не отстояли (<10 минут):\n"
-        text += "— — — — — — — — — —\n"
-
-        for item in failed_items[:5]:
-            user = session.query(User).filter_by(telegram_id=item.user_id).first()
-            username = f"@{user.username}" if user and user.username else "Неизвестно"
-            queue_type = get_queue_type_label(item.queue_type)
-            text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
-
-        text += f"📊 Итого: {len(failed_items)} номеров"
-    finally:
-        session.close()
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_day")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
-        ]
-    )
-
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_stats_week")
-@admin_only
-async def admin_stats_week(callback: CallbackQuery):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
-
-    session = SessionLocal()
-    try:
-        text = f"📊 Статистика за неделю\n\n📅 Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}\n"
-        text += "— — — — — — — — — —\n\n"
-
-        total_stood = 0
-        total_failed = 0
-
-        for i in range(7):
-            date = end_date - timedelta(days=i)
-            date_start = date.replace(hour=0, minute=0, second=0)
-            date_end = date.replace(hour=23, minute=59, second=59)
-
-            stood = session.query(QueueItem).filter(
-                QueueItem.status == "stood",
-                QueueItem.stood_at >= date_start,
-                QueueItem.stood_at <= date_end
-            ).count()
-
-            failed = session.query(QueueItem).filter(
-                QueueItem.status == "failed",
-                QueueItem.created_at >= date_start,
-                QueueItem.created_at <= date_end
-            ).count()
-
-            total_stood += stood
-            total_failed += failed
-
-            text += f"📅 {date.strftime('%d.%m.%Y')}\n✅ Отстояло: {stood}\n❌ Слетело: {failed}\n— — — — — — — — — —\n\n"
-
-        text += f"📊 Итого за неделю:\n✅ Отстояло: {total_stood}\n❌ Слетело: {total_failed}"
-    finally:
-        session.close()
-
-    await callback.message.edit_text(text, reply_markup=back_keyboard("admin_panel"))
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_stats_all")
-@admin_only
-async def admin_stats_all(callback: CallbackQuery):
+# ---------- СЕКРЕТНАЯ: Статистика ----------
+@dp.callback_query(lambda c: c.data == "secret_stats")
+async def secret_stats(callback: CallbackQuery):
     session = SessionLocal()
     try:
         stats = session.query(BotStats).first()
@@ -1486,8 +1359,8 @@ async def admin_stats_all(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_stats_all")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="secret_stats")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
         ]
     )
 
@@ -1495,31 +1368,9 @@ async def admin_stats_all(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data == "admin_balances")
-@admin_only
-async def admin_balances(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(10).all()
-        total_balance = session.query(func.sum(User.balance)).scalar() or 0
-
-        text = "💰 Топ пользователей по балансу\n\n"
-
-        for i, user in enumerate(users[:10], 1):
-            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            text += f"{i}. {username} — {user.balance:.2f}$\n"
-
-        text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
-    finally:
-        session.close()
-
-    await callback.message.edit_text(text, reply_markup=back_keyboard("admin_panel"))
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_users")
-@admin_only
-async def admin_users(callback: CallbackQuery):
+# ---------- СЕКРЕТНАЯ: Пользователи ----------
+@dp.callback_query(lambda c: c.data == "secret_users")
+async def secret_users(callback: CallbackQuery):
     session = SessionLocal()
     try:
         users = session.query(User).limit(10).all()
@@ -1528,9 +1379,9 @@ async def admin_users(callback: CallbackQuery):
         for user in users[:10]:
             status = "✅" if not user.is_blocked else "🔒"
             username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            keyboard_buttons.append([InlineKeyboardButton(text=f"{status} {username}", callback_data=f"admin_user_{user.telegram_id}")])
+            keyboard_buttons.append([InlineKeyboardButton(text=f"{status} {username}", callback_data=f"secret_user_{user.telegram_id}")])
 
-        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     finally:
         session.close()
@@ -1539,9 +1390,8 @@ async def admin_users(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("admin_user_"))
-@admin_only
-async def admin_user_detail(callback: CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("secret_user_"))
+async def secret_user_detail(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
@@ -1561,14 +1411,19 @@ async def admin_user_detail(callback: CallbackQuery):
 
         keyboard_buttons = []
         if user.is_blocked:
-            keyboard_buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"admin_unblock_{user.telegram_id}")])
+            keyboard_buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"secret_unblock_{user.telegram_id}")])
         else:
-            keyboard_buttons.append([InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_{user.telegram_id}")])
+            keyboard_buttons.append([InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"secret_block_{user.telegram_id}")])
         
         keyboard_buttons.append([
-            InlineKeyboardButton(text="💰 Баланс", callback_data=f"admin_balance_{user.telegram_id}"),
-            InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")
+            InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"secret_add_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"secret_add_balance_{user.telegram_id}_50")
         ])
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"secret_sub_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"secret_sub_balance_{user.telegram_id}_50")
+        ])
+        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="secret_users")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     finally:
@@ -1578,9 +1433,8 @@ async def admin_user_detail(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("admin_block_"))
-@admin_only
-async def admin_block_user(callback: CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("secret_block_"))
+async def secret_block_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
@@ -1595,9 +1449,8 @@ async def admin_block_user(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("admin_unblock_"))
-@admin_only
-async def admin_unblock_user(callback: CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("secret_unblock_"))
+async def secret_unblock_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
@@ -1612,43 +1465,8 @@ async def admin_unblock_user(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("admin_balance_"))
-@admin_only
-async def admin_balance_user(callback: CallbackQuery):
-    telegram_id = int(callback.data.split("_")[2])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"admin_add_balance_{user.telegram_id}_10"),
-                    InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"admin_add_balance_{user.telegram_id}_50")
-                ],
-                [
-                    InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"admin_sub_balance_{user.telegram_id}_10"),
-                    InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"admin_sub_balance_{user.telegram_id}_50")
-                ],
-                [
-                    InlineKeyboardButton(text="🔙 Назад", callback_data=f"admin_user_{user.telegram_id}")
-                ]
-            ]
-        )
-    finally:
-        session.close()
-
-    await callback.message.edit_text(
-        f"💰 Баланс пользователя: {user.balance}$\n\nВыберите действие:",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("admin_add_balance_"))
-@admin_only
-async def admin_add_balance(callback: CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("secret_add_balance_"))
+async def secret_add_balance(callback: CallbackQuery):
     parts = callback.data.split("_")
     telegram_id = int(parts[3])
     amount = float(parts[4])
@@ -1665,9 +1483,8 @@ async def admin_add_balance(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("admin_sub_balance_"))
-@admin_only
-async def admin_sub_balance(callback: CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("secret_sub_balance_"))
+async def secret_sub_balance(callback: CallbackQuery):
     parts = callback.data.split("_")
     telegram_id = int(parts[3])
     amount = float(parts[4])
@@ -1689,20 +1506,42 @@ async def admin_sub_balance(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data == "admin_topup")
-@admin_only
-async def admin_topup(callback: CallbackQuery):
+# ---------- СЕКРЕТНАЯ: Балансы ----------
+@dp.callback_query(lambda c: c.data == "secret_balances")
+async def secret_balances(callback: CallbackQuery):
+    session = SessionLocal()
+    try:
+        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(10).all()
+        total_balance = session.query(func.sum(User.balance)).scalar() or 0
+
+        text = "💰 Топ пользователей по балансу\n\n"
+
+        for i, user in enumerate(users[:10], 1):
+            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+            text += f"{i}. {username} — {user.balance:.2f}$\n"
+
+        text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
+    finally:
+        session.close()
+
+    await callback.message.edit_text(text, reply_markup=back_keyboard())
+    await callback.answer()
+
+
+# ---------- СЕКРЕТНАЯ: Пополнить казну ----------
+@dp.callback_query(lambda c: c.data == "secret_topup")
+async def secret_topup(callback: CallbackQuery):
     amounts = [10, 25, 50, 100, 500, 1000]
     keyboard_buttons = []
     row = []
     for amount in amounts:
-        row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"topup_{amount}"))
+        row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"secret_topup_{amount}"))
         if len(row) == 3:
             keyboard_buttons.append(row)
             row = []
     if row:
         keyboard_buttons.append(row)
-    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
@@ -1725,10 +1564,9 @@ async def admin_topup(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("topup_"))
-@admin_only
-async def process_topup(callback: CallbackQuery):
-    amount = float(callback.data.split("_")[1])
+@dp.callback_query(lambda c: c.data.startswith("secret_topup_"))
+async def secret_process_topup(callback: CallbackQuery):
+    amount = float(callback.data.split("_")[2])
 
     try:
         invoice_result = await crypto.create_invoice(amount, "USDT", f"Пополнение казны {amount} USDT")
@@ -1741,10 +1579,10 @@ async def process_topup(callback: CallbackQuery):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(text="🔗 Оплатить счет", url=invoice_url),
-                        InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_invoice_{invoice_id}")
+                        InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"secret_check_invoice_{invoice_id}")
                     ],
                     [
-                        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_topup")
+                        InlineKeyboardButton(text="🔙 Назад", callback_data="secret_topup")
                     ]
                 ]
             )
@@ -1771,10 +1609,9 @@ async def process_topup(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("check_invoice_"))
-@admin_only
-async def check_invoice(callback: CallbackQuery):
-    invoice_id = callback.data.split("_")[2]
+@dp.callback_query(lambda c: c.data.startswith("secret_check_invoice_"))
+async def secret_check_invoice(callback: CallbackQuery):
+    invoice_id = callback.data.split("_")[3]
 
     try:
         session = SessionLocal()
@@ -1793,7 +1630,7 @@ async def check_invoice(callback: CallbackQuery):
 💳 Счет оплачен: {invoice_id}
 
 📌 Текущий баланс обновлен""",
-            reply_markup=back_keyboard("admin_topup")
+            reply_markup=back_keyboard("secret_topup")
         )
     except Exception as e:
         logger.error(f"Error checking invoice: {e}")
@@ -1802,53 +1639,19 @@ async def check_invoice(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data == "admin_edit_price")
-@admin_only
-async def admin_edit_price(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.waiting_price)
-    await callback.message.edit_text(
-        f"""📝 Редактирование прайса
-
-💰 Текущая цена: {PRICE_NORMAL}$
-
-Введите новую цену за 10+ минут:""",
-        reply_markup=back_keyboard("admin_panel")
-    )
-    await callback.answer()
-
-
-@dp.message(AdminStates.waiting_price)
-@admin_only
-async def process_price(message: Message, state: FSMContext):
-    try:
-        new_price = float(message.text.replace(",", "."))
-        if new_price <= 0:
-            await message.reply("❌ Цена должна быть больше 0")
-            return
-
-        global PRICE_NORMAL
-        PRICE_NORMAL = new_price
-
-        await message.reply(f"✅ Цена обновлена! Новая цена: {PRICE_NORMAL}$")
-        await state.finish()
-    except ValueError:
-        await message.reply("❌ Введите корректное число")
-
-
-@dp.callback_query(lambda c: c.data == "admin_mailing")
-@admin_only
-async def admin_mailing(callback: CallbackQuery, state: FSMContext):
+# ---------- СЕКРЕТНАЯ: Рассылка ----------
+@dp.callback_query(lambda c: c.data == "secret_mailing")
+async def secret_mailing(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_mailing_text)
     await callback.message.edit_text(
         "📨 Рассылка\n\nОтправьте текст для рассылки.\nМожно также отправить фото с подписью.",
-        reply_markup=back_keyboard("admin_panel")
+        reply_markup=back_keyboard()
     )
     await callback.answer()
 
 
 @dp.message(AdminStates.waiting_mailing_text)
-@admin_only
-async def process_mailing(message: Message, state: FSMContext):
+async def secret_process_mailing(message: Message, state: FSMContext):
     text = message.text or message.caption
     photo = message.photo[-1].file_id if message.photo else None
 
@@ -1885,9 +1688,9 @@ async def process_mailing(message: Message, state: FSMContext):
     await state.finish()
 
 
-@dp.callback_query(lambda c: c.data == "admin_withdraw_history")
-@admin_only
-async def admin_withdraw_history(callback: CallbackQuery):
+# ---------- СЕКРЕТНАЯ: История выводов ----------
+@dp.callback_query(lambda c: c.data == "secret_withdraw_history")
+async def secret_withdraw_history(callback: CallbackQuery):
     session = SessionLocal()
     try:
         withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(20).all()
@@ -1908,8 +1711,8 @@ async def admin_withdraw_history(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_history")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="secret_withdraw_history")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
         ]
     )
 
@@ -1917,48 +1720,9 @@ async def admin_withdraw_history(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data == "admin_withdraw_requests")
-@admin_only
-async def admin_withdraw_requests(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        pending = session.query(WithdrawRequest).filter_by(status="pending").all()
-
-        if not pending:
-            await callback.message.edit_text(
-                "📊 Нет активных заявок на вывод",
-                reply_markup=back_keyboard("admin_panel")
-            )
-            return
-
-        text = "📊 Заявки на вывод\n\n"
-
-        for w in pending:
-            user = get_user(session, w.user_id)
-            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            text += f"""⏳ {username}
-💰 {w.amount}$
-📅 {w.created_at.strftime('%d.%m.%Y %H:%M')}
-🆔 {w.check_id}
-— — — — — — — — — —
-"""
-    finally:
-        session.close()
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdraw_requests")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
-        ]
-    )
-
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_calculate_payments")
-@admin_only
-async def admin_calculate_payments(callback: CallbackQuery):
+# ---------- СЕКРЕТНАЯ: Расчет оплат ----------
+@dp.callback_query(lambda c: c.data == "secret_calculate_payments")
+async def secret_calculate_payments(callback: CallbackQuery):
     session = SessionLocal()
     try:
         items = session.query(QueueItem).filter_by(queue_type="normal", status="stood", is_paid=False).all()
@@ -1966,7 +1730,7 @@ async def admin_calculate_payments(callback: CallbackQuery):
         if not items:
             await callback.message.edit_text(
                 "💥 Нет номеров для расчета оплат",
-                reply_markup=back_keyboard("admin_panel")
+                reply_markup=back_keyboard()
             )
             return
 
@@ -2001,9 +1765,41 @@ async def admin_calculate_payments(callback: CallbackQuery):
 💰 Общая сумма: {total}$
 
 Все пользователи получили начисления на баланс.""",
-        reply_markup=back_keyboard("admin_panel")
+        reply_markup=back_keyboard()
     )
     await callback.answer()
+
+
+# ---------- СЕКРЕТНАЯ: Редактировать прайс ----------
+@dp.callback_query(lambda c: c.data == "secret_edit_price")
+async def secret_edit_price(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.waiting_price)
+    await callback.message.edit_text(
+        f"""📝 Редактирование прайса
+
+💰 Текущая цена: {PRICE_NORMAL}$
+
+Введите новую цену за 10+ минут:""",
+        reply_markup=back_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.message(AdminStates.waiting_price)
+async def secret_process_price(message: Message, state: FSMContext):
+    try:
+        new_price = float(message.text.replace(",", "."))
+        if new_price <= 0:
+            await message.reply("❌ Цена должна быть больше 0")
+            return
+
+        global PRICE_NORMAL
+        PRICE_NORMAL = new_price
+
+        await message.reply(f"✅ Цена обновлена! Новая цена: {PRICE_NORMAL}$")
+        await state.finish()
+    except ValueError:
+        await message.reply("❌ Введите корректное число")
 
 
 # ==================== ОБНОВЛЕНИЕ СТАТИСТИКИ ====================
@@ -2051,15 +1847,12 @@ async def update_bot_stats():
 
 async def on_startup():
     """Действия при запуске бота"""
-    # Добавляем задачи в планировщик
     scheduler.add_job(update_daily_stats, CronTrigger(hour=0, minute=0))
     scheduler.add_job(update_bot_stats, CronTrigger(hour=0, minute=5))
     
-    # Запускаем планировщик
     scheduler.start()
     logger.info("Планировщик запущен")
     
-    # Инициализация базы данных
     Base.metadata.create_all(engine)
     logger.info("База данных инициализирована")
 
@@ -2088,11 +1881,9 @@ async def unknown_message(message: Message):
 
 
 async def main():
-    # Регистрируем события
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # Запускаем бота
     await dp.start_polling(bot, skip_updates=True)
 
 
