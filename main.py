@@ -23,8 +23,7 @@ from aiogram.types import (
 from aiogram.client.default import DefaultBotProperties
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, BigInteger, func
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)  # <-- ИСПРАВЛЕНО
 
 
 class User(Base):
@@ -157,6 +156,11 @@ class AdminStates(StatesGroup):
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+def generate_secret_code() -> str:
+    """Генерация секретного кода"""
+    return ''.join(random.choices('0123456789', k=6))
+
 
 def get_user(session: Session, telegram_id: int) -> User:
     user = session.query(User).filter_by(telegram_id=telegram_id).first()
@@ -345,17 +349,17 @@ def connect_method_keyboard() -> InlineKeyboardMarkup:
     keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="group_back"))
     return keyboard
 
+
 # ==================== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЯ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     session = SessionLocal()
-    user = get_user(session, message.from_user.id)
-    session.close()
+    try:
+        user = get_user(session, message.from_user.id)
+        photo = session.query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
 
-    photo = SessionLocal().query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
-
-    text = f"""💬 Добро пожаловать в Babrito WA
+        text = f"""💬 Добро пожаловать в Babrito WA
 
 🏷 Username: @{message.from_user.username or 'Не указан'}
 💰 Цена за аккаунт: {PRICE_NORMAL}$
@@ -363,22 +367,23 @@ async def cmd_start(message: Message):
 
 💬 Выберите нужный раздел:"""
 
-    if photo:
-        await bot.send_photo(message.chat.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
-    else:
-        await message.reply(text, reply_markup=main_menu_keyboard())
+        if photo:
+            await bot.send_photo(message.chat.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
+        else:
+            await message.reply(text, reply_markup=main_menu_keyboard())
+    finally:
+        session.close()
 
 
 @dp.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery):
     await callback.message.delete()
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
-    session.close()
+    try:
+        user = get_user(session, callback.from_user.id)
+        photo = session.query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
 
-    photo = SessionLocal().query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
-
-    text = f"""💬 Добро пожаловать в Babrito WA
+        text = f"""💬 Добро пожаловать в Babrito WA
 
 🏷 Username: @{callback.from_user.username or 'Не указан'}
 💰 Цена за аккаунт: {PRICE_NORMAL}$
@@ -386,10 +391,12 @@ async def back_to_menu(callback: CallbackQuery):
 
 💬 Выберите нужный раздел:"""
 
-    if photo:
-        await bot.send_photo(callback.from_user.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
-    else:
-        await callback.message.answer(text, reply_markup=main_menu_keyboard())
+        if photo:
+            await bot.send_photo(callback.from_user.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
+        else:
+            await callback.message.answer(text, reply_markup=main_menu_keyboard())
+    finally:
+        session.close()
     await callback.answer()
 
 
@@ -405,26 +412,28 @@ async def support_callback(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "profile")
 async def profile_callback(callback: CallbackQuery):
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
+    try:
+        user = get_user(session, callback.from_user.id)
 
-    text = f"""👤 Профиль
+        text = f"""👤 Профиль
 
 🏷 Username: @{callback.from_user.username or 'Не указан'}
 💰 Цена за аккаунт: {PRICE_NORMAL}$
 💰 Баланс: {user.balance}$
 💬 Дата регистрации: {user.registered_at.strftime('%d.%m.%Y')}"""
 
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="📊 Статистика", callback_data="stats_menu"),
-        InlineKeyboardButton(text="💸 Вывод", callback_data="withdraw_menu")
-    )
-    keyboard.add(
-        InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
-    )
-
-    session.close()
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats_menu"),
+            InlineKeyboardButton(text="💸 Вывод", callback_data="withdraw_menu")
+        )
+        keyboard.add(
+            InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+        )
+    finally:
+        session.close()
+    
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
@@ -432,36 +441,36 @@ async def profile_callback(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "my_queue")
 async def my_queue_callback(callback: CallbackQuery):
     session = SessionLocal()
-    queue_items = get_user_queue(session, callback.from_user.id)
-    total = get_queue_count(session)
+    try:
+        queue_items = get_user_queue(session, callback.from_user.id)
+        total = get_queue_count(session)
 
-    if not queue_items:
-        await callback.message.edit_text(
-            "📋 Ваша очередь пуста",
-            reply_markup=back_keyboard()
-        )
+        if not queue_items:
+            await callback.message.edit_text(
+                "📋 Ваша очередь пуста",
+                reply_markup=back_keyboard()
+            )
+            return
+
+        text = f"📋 Ваша очередь\n\n📊 Всего номеров в очереди: {total}\n— — — — — — — — — —\n\n"
+
+        for i, item in enumerate(queue_items[:10], 1):
+            status_emoji = get_status_emoji(item.status)
+            queue_type = get_queue_type_label(item.queue_type)
+
+            if item.status == "waiting":
+                position = get_queue_position(session, item.id)
+                text += f"📍 Место #{position}\n"
+            else:
+                text += f"📍 Статус: {status_emoji} Взят\n"
+
+            text += f"📱 {item.phone_number}\n"
+            text += f"📌 {queue_type}\n— — — — — — — — — —\n\n"
+
+        if len(queue_items) > 10:
+            text += f"и еще {len(queue_items) - 10} номеров..."
+    finally:
         session.close()
-        return
-
-    text = f"📋 Ваша очередь\n\n📊 Всего номеров в очереди: {total}\n— — — — — — — — — —\n\n"
-
-    for i, item in enumerate(queue_items[:10], 1):
-        status_emoji = get_status_emoji(item.status)
-        queue_type = get_queue_type_label(item.queue_type)
-
-        if item.status == "waiting":
-            position = get_queue_position(session, item.id)
-            text += f"📍 Место #{position}\n"
-        else:
-            text += f"📍 Статус: {status_emoji} Взят\n"
-
-        text += f"📱 {item.phone_number}\n"
-        text += f"📌 {queue_type}\n— — — — — — — — — —\n\n"
-
-    if len(queue_items) > 10:
-        text += f"и еще {len(queue_items) - 10} номеров..."
-
-    session.close()
 
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -494,19 +503,20 @@ async def show_stats(callback: CallbackQuery):
     period = callback.data.split("_")[1]
 
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
+    try:
+        user = get_user(session, callback.from_user.id)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    if user.daily_date != today:
-        user.daily_taken = 0
-        user.daily_stood = 0
-        user.daily_failed = 0
-        user.daily_profit = 0
-        user.daily_date = today
-        session.commit()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if user.daily_date != today:
+            user.daily_taken = 0
+            user.daily_stood = 0
+            user.daily_failed = 0
+            user.daily_profit = 0
+            user.daily_date = today
+            session.commit()
 
-    if period == "today":
-        text = f"""💬 Период: Сегодня
+        if period == "today":
+            text = f"""💬 Период: Сегодня
 
 — — — — — — — — — —
 
@@ -514,8 +524,8 @@ async def show_stats(callback: CallbackQuery):
 📤 Отстояло: {user.daily_stood}
 📉 Слёт: {user.daily_failed}
 💰 Прибыль: {user.daily_profit}$"""
-    else:
-        text = f"""💬 Период: За всё время
+        else:
+            text = f"""💬 Период: За всё время
 
 — — — — — — — — — —
 
@@ -523,8 +533,9 @@ async def show_stats(callback: CallbackQuery):
 📤 Отстояло: {user.total_stood}
 📉 Слёт: {user.total_failed}
 💰 Прибыль: {user.total_profit}$"""
-
-    session.close()
+    finally:
+        session.close()
+    
     await callback.message.edit_text(text, reply_markup=back_keyboard("stats_menu"))
     await callback.answer()
 
@@ -574,33 +585,32 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
     phone = parts[2]
 
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
+    try:
+        user = get_user(session, callback.from_user.id)
 
-    if user.is_blocked:
-        await callback.message.edit_text("❌ Вы заблокированы. Обратитесь к администратору.")
-        session.close()
-        await state.finish()
-        return
+        if user.is_blocked:
+            await callback.message.edit_text("❌ Вы заблокированы. Обратитесь к администратору.")
+            await state.finish()
+            return
 
-    price = PRICE_FAST if queue_type == "fast" else PRICE_NORMAL
+        price = PRICE_FAST if queue_type == "fast" else PRICE_NORMAL
 
-    queue_item = QueueItem(
-        phone_number=phone,
-        user_id=callback.from_user.id,
-        queue_type=queue_type,
-        price=price
-    )
-    session.add(queue_item)
-    session.commit()
+        queue_item = QueueItem(
+            phone_number=phone,
+            user_id=callback.from_user.id,
+            queue_type=queue_type,
+            price=price
+        )
+        session.add(queue_item)
+        session.commit()
 
-    position = get_queue_position(session, queue_item.id)
-    total = get_queue_count(session)
-    session.close()
+        position = get_queue_position(session, queue_item.id)
+        total = get_queue_count(session)
 
-    payment_info = "оплата сразу" if queue_type == "fast" else "оплата утром"
+        payment_info = "оплата сразу" if queue_type == "fast" else "оплата утром"
 
-    await callback.message.edit_text(
-        f"""✅ Номер успешно добавлен в очередь!
+        await callback.message.edit_text(
+            f"""✅ Номер успешно добавлен в очередь!
 
 🏷 Номер: {phone}
 💰 Цена: {price}$ за 10+ минут
@@ -609,11 +619,14 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
 📊 Ваша позиция: {position}/{total}
 
 ⏳ Ожидайте пока админ возьмет ваш номер""",
-        reply_markup=InlineKeyboardMarkup(row_width=2).add(
-            InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-            InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
+            reply_markup=InlineKeyboardMarkup(row_width=2).add(
+                InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
+                InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
+            )
         )
-    )
+    finally:
+        session.close()
+    
     await state.finish()
     await callback.answer()
 
@@ -623,30 +636,32 @@ async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "withdraw_menu")
 async def withdraw_menu(callback: CallbackQuery):
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
+    try:
+        user = get_user(session, callback.from_user.id)
 
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    amounts = [10, 25, 50, 100]
-    for amount in amounts:
-        if user.balance >= amount:
-            keyboard.insert(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"withdraw_{amount}"))
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        amounts = [10, 25, 50, 100]
+        for amount in amounts:
+            if user.balance >= amount:
+                keyboard.insert(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"withdraw_{amount}"))
 
-    if user.balance >= MIN_WITHDRAW:
-        keyboard.add(InlineKeyboardButton(text=f"💰 Весь баланс ({int(user.balance)}$)", callback_data=f"withdraw_{int(user.balance)}"))
+        if user.balance >= MIN_WITHDRAW:
+            keyboard.add(InlineKeyboardButton(text=f"💰 Весь баланс ({int(user.balance)}$)", callback_data=f"withdraw_{int(user.balance)}"))
 
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="profile"))
+        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="profile"))
 
-    session.close()
-
-    await callback.message.edit_text(
-        f"""💸 ВЫВОД СРЕДСТВ
+        await callback.message.edit_text(
+            f"""💸 ВЫВОД СРЕДСТВ
 
 💰 Ваш баланс: {user.balance}$
 💳 Минимальная сумма: {MIN_WITHDRAW}$
 
 Выберите сумму для вывода:""",
-        reply_markup=keyboard
-    )
+            reply_markup=keyboard
+        )
+    finally:
+        session.close()
+    
     await callback.answer()
 
 
@@ -655,43 +670,42 @@ async def process_withdraw(callback: CallbackQuery):
     amount = float(callback.data.split("_")[1])
 
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
-
-    if user.balance < amount:
-        await callback.message.edit_text("❌ Недостаточно средств на балансе.")
-        session.close()
-        return
-
-    if amount < MIN_WITHDRAW:
-        await callback.message.edit_text(f"❌ Минимальная сумма вывода {MIN_WITHDRAW}$")
-        session.close()
-        return
-
     try:
-        check_result = await crypto.create_check(amount, "USDT", f"Вывод для @{user.username or user.telegram_id}")
-        if check_result.get("ok"):
-            check_data = check_result["result"]
-            check_id = check_data["check_id"]
-            check_url = check_data["url"]
+        user = get_user(session, callback.from_user.id)
 
-            withdraw = WithdrawRequest(
-                user_id=user.telegram_id,
-                amount=amount,
-                check_id=check_id,
-                check_url=check_url
-            )
-            session.add(withdraw)
-            session.commit()
+        if user.balance < amount:
+            await callback.message.edit_text("❌ Недостаточно средств на балансе.")
+            return
 
-            keyboard = InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_withdraw_{withdraw.id}")
-            )
-            keyboard.add(InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu"))
+        if amount < MIN_WITHDRAW:
+            await callback.message.edit_text(f"❌ Минимальная сумма вывода {MIN_WITHDRAW}$")
+            return
 
-            await callback.message.edit_text(
-                f"""🧾 ЧЕК НА ВЫВОД
+        try:
+            check_result = await crypto.create_check(amount, "USDT", f"Вывод для @{user.username or user.telegram_id}")
+            if check_result.get("ok"):
+                check_data = check_result["result"]
+                check_id = check_data["check_id"]
+                check_url = check_data["url"]
+
+                withdraw = WithdrawRequest(
+                    user_id=user.telegram_id,
+                    amount=amount,
+                    check_id=check_id,
+                    check_url=check_url
+                )
+                session.add(withdraw)
+                session.commit()
+
+                keyboard = InlineKeyboardMarkup(row_width=2)
+                keyboard.add(
+                    InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
+                    InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_withdraw_{withdraw.id}")
+                )
+                keyboard.add(InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu"))
+
+                await callback.message.edit_text(
+                    f"""🧾 ЧЕК НА ВЫВОД
 
 💰 Сумма: {amount}$
 🆔 ID чека: {check_id}
@@ -701,15 +715,16 @@ async def process_withdraw(callback: CallbackQuery):
 
 📱 Перейдите по ссылке и активируйте чек
 После активации вы получите USDT на свой кошелек""",
-                reply_markup=keyboard
-            )
-        else:
+                    reply_markup=keyboard
+                )
+            else:
+                await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
+        except Exception as e:
+            logger.error(f"Error creating check: {e}")
             await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
-    except Exception as e:
-        logger.error(f"Error creating check: {e}")
-        await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
-
-    session.close()
+    finally:
+        session.close()
+    
     await callback.answer()
 
 
@@ -718,52 +733,53 @@ async def check_withdraw_status(callback: CallbackQuery):
     withdraw_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
-    withdraw = session.query(WithdrawRequest).filter_by(id=withdraw_id).first()
-
-    if not withdraw:
-        await callback.message.edit_text("❌ Заявка не найдена.")
-        session.close()
-        return
-
     try:
-        status_result = await crypto.get_check_status(withdraw.check_id)
-        if status_result.get("ok"):
-            status = status_result["result"]["status"]
-            if status == "active":
-                withdraw.status = "completed"
-                withdraw.completed_at = datetime.now()
+        withdraw = session.query(WithdrawRequest).filter_by(id=withdraw_id).first()
 
-                user = get_user(session, withdraw.user_id)
-                user.balance -= withdraw.amount
+        if not withdraw:
+            await callback.message.edit_text("❌ Заявка не найдена.")
+            return
 
-                stats = session.query(BotStats).first()
-                if stats:
-                    stats.total_profit += withdraw.amount
+        try:
+            status_result = await crypto.get_check_status(withdraw.check_id)
+            if status_result.get("ok"):
+                status = status_result["result"]["status"]
+                if status == "active":
+                    withdraw.status = "completed"
+                    withdraw.completed_at = datetime.now()
 
-                session.commit()
+                    user = get_user(session, withdraw.user_id)
+                    user.balance -= withdraw.amount
 
-                await callback.message.edit_text(
-                    f"""✅ ВЫВОД ПОДТВЕРЖДЕН!
+                    stats = session.query(BotStats).first()
+                    if stats:
+                        stats.total_profit += withdraw.amount
+
+                    session.commit()
+
+                    await callback.message.edit_text(
+                        f"""✅ ВЫВОД ПОДТВЕРЖДЕН!
 
 💰 Чек активирован!
 🆔 ID: {withdraw.check_id}
 
 📌 Средства поступят на ваш кошелек в ближайшее время""",
-                    reply_markup=back_keyboard()
-                )
-            else:
-                await callback.message.edit_text(
-                    f"⏳ Чек еще не активирован. Статус: {status}",
-                    reply_markup=InlineKeyboardMarkup(row_width=1).add(
-                        InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_withdraw_{withdraw.id}"),
-                        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+                        reply_markup=back_keyboard()
                     )
-                )
-    except Exception as e:
-        logger.error(f"Error checking withdraw status: {e}")
-        await callback.message.edit_text("❌ Ошибка при проверке статуса. Попробуйте позже.")
-
-    session.close()
+                else:
+                    await callback.message.edit_text(
+                        f"⏳ Чек еще не активирован. Статус: {status}",
+                        reply_markup=InlineKeyboardMarkup(row_width=1).add(
+                            InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_withdraw_{withdraw.id}"),
+                            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+                        )
+                    )
+        except Exception as e:
+            logger.error(f"Error checking withdraw status: {e}")
+            await callback.message.edit_text("❌ Ошибка при проверке статуса. Попробуйте позже.")
+    finally:
+        session.close()
+    
     await callback.answer()
 
 
@@ -858,37 +874,36 @@ async def process_code(message: Message, state: FSMContext):
     code = message.text.strip()
 
     session = SessionLocal()
+    try:
+        queue_item = session.query(QueueItem).filter_by(secret_code=code, status="waiting").first()
 
-    queue_item = session.query(QueueItem).filter_by(secret_code=code, status="waiting").first()
+        if not queue_item:
+            await message.reply("❌ Неверный код. Попробуйте снова или нажмите /cancel")
+            return
 
-    if not queue_item:
-        await message.reply("❌ Неверный код. Попробуйте снова или нажмите /cancel")
-        session.close()
-        return
+        queue_item.status = "taken"
+        queue_item.taken_at = datetime.now()
 
-    queue_item.status = "taken"
-    queue_item.taken_at = datetime.now()
+        user = get_user(session, queue_item.user_id)
+        user.total_taken += 1
 
-    user = get_user(session, queue_item.user_id)
-    user.total_taken += 1
+        today = datetime.now().strftime("%Y-%m-%d")
+        if user.daily_date == today:
+            user.daily_taken += 1
+        else:
+            user.daily_taken = 1
+            user.daily_date = today
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    if user.daily_date == today:
-        user.daily_taken += 1
-    else:
-        user.daily_taken = 1
-        user.daily_date = today
+        keyboard = InlineKeyboardMarkup(row_width=3)
+        keyboard.add(
+            InlineKeyboardButton(text="✅ Встал", callback_data=f"stood_{queue_item.id}"),
+            InlineKeyboardButton(text="🔄 Повтор", callback_data=f"retry_{queue_item.id}"),
+            InlineKeyboardButton(text="❌ Ошибка", callback_data=f"failed_{queue_item.id}")
+        )
 
-    keyboard = InlineKeyboardMarkup(row_width=3)
-    keyboard.add(
-        InlineKeyboardButton(text="✅ Встал", callback_data=f"stood_{queue_item.id}"),
-        InlineKeyboardButton(text="🔄 Повтор", callback_data=f"retry_{queue_item.id}"),
-        InlineKeyboardButton(text="❌ Ошибка", callback_data=f"failed_{queue_item.id}")
-    )
-
-    await bot.send_message(
-        GROUP_ID,
-        f"""📱 Номер взят!
+        await bot.send_message(
+            GROUP_ID,
+            f"""📱 Номер взят!
 
 👤 @{message.from_user.username or 'Неизвестно'}
 📱 {queue_item.phone_number}
@@ -896,11 +911,12 @@ async def process_code(message: Message, state: FSMContext):
 💰 {queue_item.price}$
 
 ⏳ Ожидайте подтверждения...""",
-        reply_markup=keyboard
-    )
+            reply_markup=keyboard
+        )
 
-    session.commit()
-    session.close()
+        session.commit()
+    finally:
+        session.close()
 
     await message.reply("✅ Код подтвержден! Ожидайте подтверждения в группе.")
     await state.finish()
@@ -914,68 +930,69 @@ async def number_stood(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
     session = SessionLocal()
-    queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
+    try:
+        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
 
-    if not queue_item:
-        await callback.message.edit_text("❌ Номер не найден")
-        session.close()
-        return
+        if not queue_item:
+            await callback.message.edit_text("❌ Номер не найден")
+            return
 
-    queue_item.status = "stood"
-    queue_item.stood_at = datetime.now()
+        queue_item.status = "stood"
+        queue_item.stood_at = datetime.now()
 
-    if queue_item.taken_at:
-        minutes = (datetime.now() - queue_item.taken_at).total_seconds() / 60
-        queue_item.minutes_stood = int(minutes)
+        if queue_item.taken_at:
+            minutes = (datetime.now() - queue_item.taken_at).total_seconds() / 60
+            queue_item.minutes_stood = int(minutes)
 
-    user = get_user(session, queue_item.user_id)
+        user = get_user(session, queue_item.user_id)
 
-    if queue_item.minutes_stood >= MIN_TIME_TO_EARN:
-        user.balance += queue_item.price
-        user.total_stood += 1
-        user.total_profit += queue_item.price
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if user.daily_date == today:
-            user.daily_stood += 1
-            user.daily_profit += queue_item.price
-        else:
-            user.daily_stood = 1
-            user.daily_profit = queue_item.price
-            user.daily_date = today
-
-        queue_item.is_paid = True
-        session.commit()
-
-        await callback.message.edit_text(
-            f"""✅ Номер отстоял {queue_item.minutes_stood} мин
-💰 Начислено: {queue_item.price}$"""
-        )
-    else:
-        user.total_failed += 1
-        today = datetime.now().strftime("%Y-%m-%d")
-        if user.daily_date == today:
-            user.daily_failed += 1
-        else:
-            user.daily_failed = 1
-            user.daily_date = today
-
-        session.commit()
-
-        await callback.message.edit_text(
-            f"""❌ Номер слетел за {queue_item.minutes_stood} мин
-📉 Деньги не начислены (нужно минимум {MIN_TIME_TO_EARN} мин)"""
-        )
-
-    stats = session.query(BotStats).first()
-    if stats:
         if queue_item.minutes_stood >= MIN_TIME_TO_EARN:
-            stats.total_stood += 1
-        else:
-            stats.total_failed += 1
+            user.balance += queue_item.price
+            user.total_stood += 1
+            user.total_profit += queue_item.price
 
-    session.commit()
-    session.close()
+            today = datetime.now().strftime("%Y-%m-%d")
+            if user.daily_date == today:
+                user.daily_stood += 1
+                user.daily_profit += queue_item.price
+            else:
+                user.daily_stood = 1
+                user.daily_profit = queue_item.price
+                user.daily_date = today
+
+            queue_item.is_paid = True
+            session.commit()
+
+            await callback.message.edit_text(
+                f"""✅ Номер отстоял {queue_item.minutes_stood} мин
+💰 Начислено: {queue_item.price}$"""
+            )
+        else:
+            user.total_failed += 1
+            today = datetime.now().strftime("%Y-%m-%d")
+            if user.daily_date == today:
+                user.daily_failed += 1
+            else:
+                user.daily_failed = 1
+                user.daily_date = today
+
+            session.commit()
+
+            await callback.message.edit_text(
+                f"""❌ Номер слетел за {queue_item.minutes_stood} мин
+📉 Деньги не начислены (нужно минимум {MIN_TIME_TO_EARN} мин)"""
+            )
+
+        stats = session.query(BotStats).first()
+        if stats:
+            if queue_item.minutes_stood >= MIN_TIME_TO_EARN:
+                stats.total_stood += 1
+            else:
+                stats.total_failed += 1
+
+        session.commit()
+    finally:
+        session.close()
 
     await callback.answer()
 
@@ -986,27 +1003,28 @@ async def number_failed(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
     session = SessionLocal()
-    queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
+    try:
+        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
 
-    if not queue_item:
-        await callback.message.edit_text("❌ Номер не найден")
+        if not queue_item:
+            await callback.message.edit_text("❌ Номер не найден")
+            return
+
+        queue_item.status = "failed"
+
+        user = get_user(session, queue_item.user_id)
+        user.total_failed += 1
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        if user.daily_date == today:
+            user.daily_failed += 1
+        else:
+            user.daily_failed = 1
+            user.daily_date = today
+
+        session.commit()
+    finally:
         session.close()
-        return
-
-    queue_item.status = "failed"
-
-    user = get_user(session, queue_item.user_id)
-    user.total_failed += 1
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    if user.daily_date == today:
-        user.daily_failed += 1
-    else:
-        user.daily_failed = 1
-        user.daily_date = today
-
-    session.commit()
-    session.close()
 
     await callback.message.edit_text("❌ Номер не встал")
     await callback.answer()
@@ -1018,25 +1036,28 @@ async def number_retry(callback: CallbackQuery):
     queue_id = int(callback.data.split("_")[1])
 
     session = SessionLocal()
-    queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
+    try:
+        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
 
-    if queue_item:
-        queue_item.status = "waiting"
-        queue_item.taken_at = None
-        session.commit()
+        if queue_item:
+            queue_item.status = "waiting"
+            queue_item.taken_at = None
+            session.commit()
 
-        await callback.message.edit_text("🔄 Повтор запроса")
-
-    session.close()
+            await callback.message.edit_text("🔄 Повтор запроса")
+    finally:
+        session.close()
+    
     await callback.answer()
 
 
 @dp.callback_query(lambda c: c.data == "group_my_stats")
 async def group_my_stats(callback: CallbackQuery):
     session = SessionLocal()
-    user = get_user(session, callback.from_user.id)
+    try:
+        user = get_user(session, callback.from_user.id)
 
-    text = f"""📊 Моя статистика
+        text = f"""📊 Моя статистика
 
 👤 @{callback.from_user.username or 'Неизвестно'}
 💰 Баланс: {user.balance}$
@@ -1044,8 +1065,8 @@ async def group_my_stats(callback: CallbackQuery):
 ✅ Отстояло: {user.total_stood}
 ❌ Слетело: {user.total_failed}
 💰 Прибыль: {user.total_profit}$"""
-
-    session.close()
+    finally:
+        session.close()
 
     await callback.message.edit_text(
         text,
@@ -1090,29 +1111,28 @@ async def secret_process_phone(message: Message, state: FSMContext):
         return
 
     session = SessionLocal()
-    user = get_user(session, message.from_user.id)
+    try:
+        user = get_user(session, message.from_user.id)
 
-    if user.is_blocked:
-        await message.reply("❌ Вы заблокированы.")
-        session.close()
-        await state.finish()
-        return
+        if user.is_blocked:
+            await message.reply("❌ Вы заблокированы.")
+            await state.finish()
+            return
 
-    queue_item = QueueItem(
-        phone_number=phone,
-        user_id=message.from_user.id,
-        queue_type="secret",
-        price=PRICE_SECRET
-    )
-    session.add(queue_item)
-    session.commit()
+        queue_item = QueueItem(
+            phone_number=phone,
+            user_id=message.from_user.id,
+            queue_type="secret",
+            price=PRICE_SECRET
+        )
+        session.add(queue_item)
+        session.commit()
 
-    position = get_queue_position(session, queue_item.id)
-    total = get_queue_count(session)
-    session.close()
+        position = get_queue_position(session, queue_item.id)
+        total = get_queue_count(session)
 
-    await message.reply(
-        f"""✅ Номер успешно добавлен в секретную очередь!
+        await message.reply(
+            f"""✅ Номер успешно добавлен в секретную очередь!
 
 🏷 Номер: {phone}
 💰 Цена: {PRICE_SECRET}$ за 10+ минут
@@ -1121,7 +1141,10 @@ async def secret_process_phone(message: Message, state: FSMContext):
 📊 Ваша позиция: {position}/{total}
 
 ⏳ Ожидайте пока админ возьмет ваш номер"""
-    )
+        )
+    finally:
+        session.close()
+    
     await state.finish()
 
 
@@ -1129,9 +1152,11 @@ async def secret_process_phone(message: Message, state: FSMContext):
 @admin_only
 async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
     session = SessionLocal()
-    stats = session.query(BotStats).first()
-    balance = stats.treasury_balance if stats else 0
-    session.close()
+    try:
+        stats = session.query(BotStats).first()
+        balance = stats.treasury_balance if stats else 0
+    finally:
+        session.close()
 
     await state.set_state(AdminStates.waiting_withdraw_address)
     await callback.message.edit_text(
@@ -1151,35 +1176,35 @@ async def process_withdraw_address(message: Message, state: FSMContext):
     address = message.text.strip()
 
     session = SessionLocal()
-    stats = session.query(BotStats).first()
-    amount = stats.treasury_balance if stats else 0
-
-    if amount <= 0:
-        await message.reply("❌ Баланс казны пуст.")
-        session.close()
-        await state.finish()
-        return
-
     try:
-        check_result = await crypto.create_check(amount, "USDT", f"Вывод казны на {address}")
-        if check_result.get("ok"):
-            check_data = check_result["result"]
-            check_id = check_data["check_id"]
-            check_url = check_data["url"]
+        stats = session.query(BotStats).first()
+        amount = stats.treasury_balance if stats else 0
 
-            if stats:
-                stats.treasury_balance = 0
-                session.commit()
+        if amount <= 0:
+            await message.reply("❌ Баланс казны пуст.")
+            await state.finish()
+            return
 
-            keyboard = InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
-            )
-            keyboard.add(InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu"))
+        try:
+            check_result = await crypto.create_check(amount, "USDT", f"Вывод казны на {address}")
+            if check_result.get("ok"):
+                check_data = check_result["result"]
+                check_id = check_data["check_id"]
+                check_url = check_data["url"]
 
-            await message.reply(
-                f"""🧾 ЧЕК НА ВЫВОД КАЗНЫ
+                if stats:
+                    stats.treasury_balance = 0
+                    session.commit()
+
+                keyboard = InlineKeyboardMarkup(row_width=2)
+                keyboard.add(
+                    InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
+                    InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
+                )
+                keyboard.add(InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu"))
+
+                await message.reply(
+                    f"""🧾 ЧЕК НА ВЫВОД КАЗНЫ
 
 💰 Сумма: {amount}$
 💳 Адрес: {address}
@@ -1189,15 +1214,16 @@ async def process_withdraw_address(message: Message, state: FSMContext):
 {check_url}
 
 📱 Перейдите по ссылке и активируйте чек""",
-                reply_markup=keyboard
-            )
-        else:
+                    reply_markup=keyboard
+                )
+            else:
+                await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
+        except Exception as e:
+            logger.error(f"Error creating treasury check: {e}")
             await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
-    except Exception as e:
-        logger.error(f"Error creating treasury check: {e}")
-        await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
-
-    session.close()
+    finally:
+        session.close()
+    
     await state.finish()
 
 
@@ -1241,10 +1267,12 @@ async def handle_photo(message: Message):
     photo = message.photo[-1]
 
     session = SessionLocal()
-    welcome_photo = WelcomePhoto(file_id=photo.file_id)
-    session.add(welcome_photo)
-    session.commit()
-    session.close()
+    try:
+        welcome_photo = WelcomePhoto(file_id=photo.file_id)
+        session.add(welcome_photo)
+        session.commit()
+    finally:
+        session.close()
 
     await message.reply("✅ Фото для главного приветствия обновлено!")
 
@@ -1271,40 +1299,40 @@ async def admin_panel_back(callback: CallbackQuery):
 async def admin_stats_day(callback: CallbackQuery):
     today = datetime.now().strftime("%Y-%m-%d")
     session = SessionLocal()
+    try:
+        stood_items = session.query(QueueItem).filter(
+            QueueItem.status == "stood",
+            QueueItem.stood_at >= datetime.now().replace(hour=0, minute=0, second=0)
+        ).all()
 
-    stood_items = session.query(QueueItem).filter(
-        QueueItem.status == "stood",
-        QueueItem.stood_at >= datetime.now().replace(hour=0, minute=0, second=0)
-    ).all()
+        failed_items = session.query(QueueItem).filter(
+            QueueItem.status == "failed",
+            QueueItem.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
+        ).all()
 
-    failed_items = session.query(QueueItem).filter(
-        QueueItem.status == "failed",
-        QueueItem.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
-    ).all()
+        text = f"📊 Статистика за {today}\n\n✅ Отстояли (10+ минут):\n"
+        text += "— — — — — — — — — —\n"
 
-    text = f"📊 Статистика за {today}\n\n✅ Отстояли (10+ минут):\n"
-    text += "— — — — — — — — — —\n"
+        for item in stood_items[:5]:
+            user = session.query(User).filter_by(telegram_id=item.user_id).first()
+            username = f"@{user.username}" if user and user.username else "Неизвестно"
+            queue_type = get_queue_type_label(item.queue_type)
+            text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
 
-    for item in stood_items[:5]:
-        user = session.query(User).filter_by(telegram_id=item.user_id).first()
-        username = f"@{user.username}" if user and user.username else "Неизвестно"
-        queue_type = get_queue_type_label(item.queue_type)
-        text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
+        text += f"📊 Итого: {len(stood_items)} номеров\n\n"
 
-    text += f"📊 Итого: {len(stood_items)} номеров\n\n"
+        text += "❌ Не отстояли (<10 минут):\n"
+        text += "— — — — — — — — — —\n"
 
-    text += "❌ Не отстояли (<10 минут):\n"
-    text += "— — — — — — — — — —\n"
+        for item in failed_items[:5]:
+            user = session.query(User).filter_by(telegram_id=item.user_id).first()
+            username = f"@{user.username}" if user and user.username else "Неизвестно"
+            queue_type = get_queue_type_label(item.queue_type)
+            text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
 
-    for item in failed_items[:5]:
-        user = session.query(User).filter_by(telegram_id=item.user_id).first()
-        username = f"@{user.username}" if user and user.username else "Неизвестно"
-        queue_type = get_queue_type_label(item.queue_type)
-        text += f"📱 {item.phone_number}\n👤 {username}\n📌 {queue_type}\n⏱ {item.minutes_stood} мин\n— — — — — — — — — —\n"
-
-    text += f"📊 Итого: {len(failed_items)} номеров"
-
-    session.close()
+        text += f"📊 Итого: {len(failed_items)} номеров"
+    finally:
+        session.close()
 
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
@@ -1323,38 +1351,38 @@ async def admin_stats_week(callback: CallbackQuery):
     start_date = end_date - timedelta(days=7)
 
     session = SessionLocal()
+    try:
+        text = f"📊 Статистика за неделю\n\n📅 Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}\n"
+        text += "— — — — — — — — — —\n\n"
 
-    text = f"📊 Статистика за неделю\n\n📅 Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}\n"
-    text += "— — — — — — — — — —\n\n"
+        total_stood = 0
+        total_failed = 0
 
-    total_stood = 0
-    total_failed = 0
+        for i in range(7):
+            date = end_date - timedelta(days=i)
+            date_start = date.replace(hour=0, minute=0, second=0)
+            date_end = date.replace(hour=23, minute=59, second=59)
 
-    for i in range(7):
-        date = end_date - timedelta(days=i)
-        date_start = date.replace(hour=0, minute=0, second=0)
-        date_end = date.replace(hour=23, minute=59, second=59)
+            stood = session.query(QueueItem).filter(
+                QueueItem.status == "stood",
+                QueueItem.stood_at >= date_start,
+                QueueItem.stood_at <= date_end
+            ).count()
 
-        stood = session.query(QueueItem).filter(
-            QueueItem.status == "stood",
-            QueueItem.stood_at >= date_start,
-            QueueItem.stood_at <= date_end
-        ).count()
+            failed = session.query(QueueItem).filter(
+                QueueItem.status == "failed",
+                QueueItem.created_at >= date_start,
+                QueueItem.created_at <= date_end
+            ).count()
 
-        failed = session.query(QueueItem).filter(
-            QueueItem.status == "failed",
-            QueueItem.created_at >= date_start,
-            QueueItem.created_at <= date_end
-        ).count()
+            total_stood += stood
+            total_failed += failed
 
-        total_stood += stood
-        total_failed += failed
+            text += f"📅 {date.strftime('%d.%m.%Y')}\n✅ Отстояло: {stood}\n❌ Слетело: {failed}\n— — — — — — — — — —\n\n"
 
-        text += f"📅 {date.strftime('%d.%m.%Y')}\n✅ Отстояло: {stood}\n❌ Слетело: {failed}\n— — — — — — — — — —\n\n"
-
-    text += f"📊 Итого за неделю:\n✅ Отстояло: {total_stood}\n❌ Слетело: {total_failed}"
-
-    session.close()
+        text += f"📊 Итого за неделю:\n✅ Отстояло: {total_stood}\n❌ Слетело: {total_failed}"
+    finally:
+        session.close()
 
     await callback.message.edit_text(text, reply_markup=back_keyboard("admin_panel"))
     await callback.answer()
@@ -1364,18 +1392,18 @@ async def admin_stats_week(callback: CallbackQuery):
 @admin_only
 async def admin_stats_all(callback: CallbackQuery):
     session = SessionLocal()
+    try:
+        stats = session.query(BotStats).first()
+        if not stats:
+            stats = BotStats()
+            session.add(stats)
+            session.commit()
 
-    stats = session.query(BotStats).first()
-    if not stats:
-        stats = BotStats()
-        session.add(stats)
-        session.commit()
+        total_users = session.query(User).count()
+        blocked_users = session.query(User).filter_by(is_blocked=True).count()
+        total_balance = session.query(func.sum(User.balance)).scalar() or 0
 
-    total_users = session.query(User).count()
-    blocked_users = session.query(User).filter_by(is_blocked=True).count()
-    total_balance = session.query(func.sum(User.balance)).scalar() or 0
-
-    text = f"""📊 Вся статистика
+        text = f"""📊 Вся статистика
 
 👥 Всего пользователей: {total_users}
 🔒 Заблокировано: {blocked_users}
@@ -1385,8 +1413,8 @@ async def admin_stats_all(callback: CallbackQuery):
 📤 Всего отстояло: {stats.total_stood}
 📉 Всего слетело: {stats.total_failed}
 💰 Общая прибыль: {stats.total_profit}$"""
-
-    session.close()
+    finally:
+        session.close()
 
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
@@ -1402,19 +1430,19 @@ async def admin_stats_all(callback: CallbackQuery):
 @admin_only
 async def admin_balances(callback: CallbackQuery):
     session = SessionLocal()
+    try:
+        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(10).all()
+        total_balance = session.query(func.sum(User.balance)).scalar() or 0
 
-    users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(10).all()
-    total_balance = session.query(func.sum(User.balance)).scalar() or 0
+        text = "💰 Топ пользователей по балансу\n\n"
 
-    text = "💰 Топ пользователей по балансу\n\n"
+        for i, user in enumerate(users[:10], 1):
+            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+            text += f"{i}. {username} — {user.balance:.2f}$\n"
 
-    for i, user in enumerate(users[:10], 1):
-        username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-        text += f"{i}. {username} — {user.balance:.2f}$\n"
-
-    text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
-
-    session.close()
+        text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
+    finally:
+        session.close()
 
     await callback.message.edit_text(text, reply_markup=back_keyboard("admin_panel"))
     await callback.answer()
@@ -1424,17 +1452,19 @@ async def admin_balances(callback: CallbackQuery):
 @admin_only
 async def admin_users(callback: CallbackQuery):
     session = SessionLocal()
-    users = session.query(User).limit(10).all()
+    try:
+        users = session.query(User).limit(10).all()
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    for user in users[:10]:
-        status = "✅" if not user.is_blocked else "🔒"
-        username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-        keyboard.add(InlineKeyboardButton(text=f"{status} {username}", callback_data=f"admin_user_{user.telegram_id}"))
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        for user in users[:10]:
+            status = "✅" if not user.is_blocked else "🔒"
+            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+            keyboard.add(InlineKeyboardButton(text=f"{status} {username}", callback_data=f"admin_user_{user.telegram_id}"))
 
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
-
-    session.close()
+        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
+    finally:
+        session.close()
+    
     await callback.message.edit_text("👥 Пользователи\n\nВыберите пользователя:", reply_markup=keyboard)
     await callback.answer()
 
@@ -1445,9 +1475,10 @@ async def admin_user_detail(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
+    try:
+        user = get_user(session, telegram_id)
 
-    text = f"""👤 Пользователь
+        text = f"""👤 Пользователь
 
 🆔 ID: {user.telegram_id}
 👤 Username: @{user.username or 'Не указан'}
@@ -1458,18 +1489,19 @@ async def admin_user_detail(callback: CallbackQuery):
 ✅ Отстояло: {user.total_stood}
 ❌ Слетело: {user.total_failed}"""
 
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    if user.is_blocked:
-        keyboard.add(InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"admin_unblock_{user.telegram_id}"))
-    else:
-        keyboard.add(InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_{user.telegram_id}"))
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        if user.is_blocked:
+            keyboard.add(InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"admin_unblock_{user.telegram_id}"))
+        else:
+            keyboard.add(InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_{user.telegram_id}"))
 
-    keyboard.add(
-        InlineKeyboardButton(text="💰 Баланс", callback_data=f"admin_balance_{user.telegram_id}"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")
-    )
-
-    session.close()
+        keyboard.add(
+            InlineKeyboardButton(text="💰 Баланс", callback_data=f"admin_balance_{user.telegram_id}"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")
+        )
+    finally:
+        session.close()
+    
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
@@ -1480,10 +1512,12 @@ async def admin_block_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
-    user.is_blocked = True
-    session.commit()
-    session.close()
+    try:
+        user = get_user(session, telegram_id)
+        user.is_blocked = True
+        session.commit()
+    finally:
+        session.close()
 
     await callback.message.edit_text("✅ Пользователь заблокирован")
     await callback.answer()
@@ -1495,10 +1529,12 @@ async def admin_unblock_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
-    user.is_blocked = False
-    session.commit()
-    session.close()
+    try:
+        user = get_user(session, telegram_id)
+        user.is_blocked = False
+        session.commit()
+    finally:
+        session.close()
 
     await callback.message.edit_text("✅ Пользователь разблокирован")
     await callback.answer()
@@ -1510,24 +1546,26 @@ async def admin_balance_user(callback: CallbackQuery):
     telegram_id = int(callback.data.split("_")[2])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
+    try:
+        user = get_user(session, telegram_id)
 
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"admin_add_balance_{user.telegram_id}_10"),
-        InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"admin_add_balance_{user.telegram_id}_50")
-    )
-    keyboard.add(
-        InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"admin_sub_balance_{user.telegram_id}_10"),
-        InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"admin_sub_balance_{user.telegram_id}_50")
-    )
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"admin_user_{user.telegram_id}"))
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            InlineKeyboardButton(text="➕ Добавить 10$", callback_data=f"admin_add_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➕ Добавить 50$", callback_data=f"admin_add_balance_{user.telegram_id}_50")
+        )
+        keyboard.add(
+            InlineKeyboardButton(text="➖ Снять 10$", callback_data=f"admin_sub_balance_{user.telegram_id}_10"),
+            InlineKeyboardButton(text="➖ Снять 50$", callback_data=f"admin_sub_balance_{user.telegram_id}_50")
+        )
+        keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"admin_user_{user.telegram_id}"))
+    finally:
+        session.close()
 
     await callback.message.edit_text(
         f"💰 Баланс пользователя: {user.balance}$\n\nВыберите действие:",
         reply_markup=keyboard
     )
-    session.close()
     await callback.answer()
 
 
@@ -1539,10 +1577,12 @@ async def admin_add_balance(callback: CallbackQuery):
     amount = float(parts[4])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
-    user.balance += amount
-    session.commit()
-    session.close()
+    try:
+        user = get_user(session, telegram_id)
+        user.balance += amount
+        session.commit()
+    finally:
+        session.close()
 
     await callback.message.edit_text(f"✅ Добавлено {amount}$ на баланс пользователя")
     await callback.answer()
@@ -1556,16 +1596,17 @@ async def admin_sub_balance(callback: CallbackQuery):
     amount = float(parts[4])
 
     session = SessionLocal()
-    user = get_user(session, telegram_id)
+    try:
+        user = get_user(session, telegram_id)
 
-    if user.balance < amount:
-        await callback.message.edit_text(f"❌ Недостаточно средств. Баланс: {user.balance}$")
+        if user.balance < amount:
+            await callback.message.edit_text(f"❌ Недостаточно средств. Баланс: {user.balance}$")
+            return
+
+        user.balance -= amount
+        session.commit()
+    finally:
         session.close()
-        return
-
-    user.balance -= amount
-    session.commit()
-    session.close()
 
     await callback.message.edit_text(f"✅ Снято {amount}$ с баланса пользователя")
     await callback.answer()
@@ -1581,9 +1622,11 @@ async def admin_topup(callback: CallbackQuery):
     keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel"))
 
     session = SessionLocal()
-    stats = session.query(BotStats).first()
-    balance = stats.treasury_balance if stats else 0
-    session.close()
+    try:
+        stats = session.query(BotStats).first()
+        balance = stats.treasury_balance if stats else 0
+    finally:
+        session.close()
 
     await callback.message.edit_text(
         f"""💰 ПОПОЛНЕНИЕ КАЗНЫ
@@ -1645,11 +1688,13 @@ async def check_invoice(callback: CallbackQuery):
 
     try:
         session = SessionLocal()
-        stats = session.query(BotStats).first()
-        if stats:
-            stats.treasury_balance += 100
-            session.commit()
-        session.close()
+        try:
+            stats = session.query(BotStats).first()
+            if stats:
+                stats.treasury_balance += 100
+                session.commit()
+        finally:
+            session.close()
 
         await callback.message.edit_text(
             f"""✅ ОПЛАТА ПОДТВЕРЖДЕНА!
@@ -1718,26 +1763,27 @@ async def process_mailing(message: Message, state: FSMContext):
     photo = message.photo[-1].file_id if message.photo else None
 
     session = SessionLocal()
-    users = session.query(User).filter_by(is_blocked=False).all()
+    try:
+        users = session.query(User).filter_by(is_blocked=False).all()
 
-    await message.reply(f"📨 Начинаю рассылку...\nВсего: {len(users)}")
+        await message.reply(f"📨 Начинаю рассылку...\nВсего: {len(users)}")
 
-    sent = 0
-    failed = 0
+        sent = 0
+        failed = 0
 
-    for user in users:
-        try:
-            if photo:
-                await bot.send_photo(user.telegram_id, photo, caption=text)
-            else:
-                await bot.send_message(user.telegram_id, text)
-            sent += 1
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Failed to send to {user.telegram_id}: {e}")
-            failed += 1
-
-    session.close()
+        for user in users:
+            try:
+                if photo:
+                    await bot.send_photo(user.telegram_id, photo, caption=text)
+                else:
+                    await bot.send_message(user.telegram_id, text)
+                sent += 1
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Failed to send to {user.telegram_id}: {e}")
+                failed += 1
+    finally:
+        session.close()
 
     await message.reply(
         f"""✅ Рассылка завершена!
@@ -1753,21 +1799,22 @@ async def process_mailing(message: Message, state: FSMContext):
 @admin_only
 async def admin_withdraw_history(callback: CallbackQuery):
     session = SessionLocal()
-    withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(20).all()
+    try:
+        withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(20).all()
 
-    text = "📊 История выводов\n\n"
+        text = "📊 История выводов\n\n"
 
-    for w in withdraws:
-        user = get_user(session, w.user_id)
-        username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-        status_emoji = "✅" if w.status == "completed" else "⏳" if w.status == "pending" else "❌"
-        text += f"""{status_emoji} {w.created_at.strftime('%d.%m.%Y %H:%M')}
+        for w in withdraws:
+            user = get_user(session, w.user_id)
+            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+            status_emoji = "✅" if w.status == "completed" else "⏳" if w.status == "pending" else "❌"
+            text += f"""{status_emoji} {w.created_at.strftime('%d.%m.%Y %H:%M')}
 👤 {username}
 💰 {w.amount}$
 — — — — — — — — — —
 """
-
-    session.close()
+    finally:
+        session.close()
 
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
@@ -1783,29 +1830,29 @@ async def admin_withdraw_history(callback: CallbackQuery):
 @admin_only
 async def admin_withdraw_requests(callback: CallbackQuery):
     session = SessionLocal()
-    pending = session.query(WithdrawRequest).filter_by(status="pending").all()
+    try:
+        pending = session.query(WithdrawRequest).filter_by(status="pending").all()
 
-    if not pending:
-        await callback.message.edit_text(
-            "📊 Нет активных заявок на вывод",
-            reply_markup=back_keyboard("admin_panel")
-        )
-        session.close()
-        return
+        if not pending:
+            await callback.message.edit_text(
+                "📊 Нет активных заявок на вывод",
+                reply_markup=back_keyboard("admin_panel")
+            )
+            return
 
-    text = "📊 Заявки на вывод\n\n"
+        text = "📊 Заявки на вывод\n\n"
 
-    for w in pending:
-        user = get_user(session, w.user_id)
-        username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-        text += f"""⏳ {username}
+        for w in pending:
+            user = get_user(session, w.user_id)
+            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
+            text += f"""⏳ {username}
 💰 {w.amount}$
 📅 {w.created_at.strftime('%d.%m.%Y %H:%M')}
 🆔 {w.check_id}
 — — — — — — — — — —
 """
-
-    session.close()
+    finally:
+        session.close()
 
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
@@ -1821,39 +1868,39 @@ async def admin_withdraw_requests(callback: CallbackQuery):
 @admin_only
 async def admin_calculate_payments(callback: CallbackQuery):
     session = SessionLocal()
+    try:
+        items = session.query(QueueItem).filter_by(queue_type="normal", status="stood", is_paid=False).all()
 
-    items = session.query(QueueItem).filter_by(queue_type="normal", status="stood", is_paid=False).all()
+        if not items:
+            await callback.message.edit_text(
+                "💥 Нет номеров для расчета оплат",
+                reply_markup=back_keyboard("admin_panel")
+            )
+            return
 
-    if not items:
-        await callback.message.edit_text(
-            "💥 Нет номеров для расчета оплат",
-            reply_markup=back_keyboard("admin_panel")
-        )
+        total = 0
+        for item in items:
+            user = get_user(session, item.user_id)
+            if item.minutes_stood >= MIN_TIME_TO_EARN:
+                user.balance += item.price
+                user.total_stood += 1
+                user.total_profit += item.price
+
+                today = datetime.now().strftime("%Y-%m-%d")
+                if user.daily_date == today:
+                    user.daily_stood += 1
+                    user.daily_profit += item.price
+                else:
+                    user.daily_stood = 1
+                    user.daily_profit = item.price
+                    user.daily_date = today
+
+                item.is_paid = True
+                total += item.price
+
+        session.commit()
+    finally:
         session.close()
-        return
-
-    total = 0
-    for item in items:
-        user = get_user(session, item.user_id)
-        if item.minutes_stood >= MIN_TIME_TO_EARN:
-            user.balance += item.price
-            user.total_stood += 1
-            user.total_profit += item.price
-
-            today = datetime.now().strftime("%Y-%m-%d")
-            if user.daily_date == today:
-                user.daily_stood += 1
-                user.daily_profit += item.price
-            else:
-                user.daily_stood = 1
-                user.daily_profit = item.price
-                user.daily_date = today
-
-            item.is_paid = True
-            total += item.price
-
-    session.commit()
-    session.close()
 
     await callback.message.edit_text(
         f"""💥 РАСЧЕТ ОПЛАТ ВЫПОЛНЕН!
@@ -1871,38 +1918,41 @@ async def admin_calculate_payments(callback: CallbackQuery):
 
 async def update_daily_stats():
     session = SessionLocal()
-    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
 
-    users = session.query(User).all()
-    for user in users:
-        if user.daily_date != today:
-            user.daily_taken = 0
-            user.daily_stood = 0
-            user.daily_failed = 0
-            user.daily_profit = 0
-            user.daily_date = today
+        users = session.query(User).all()
+        for user in users:
+            if user.daily_date != today:
+                user.daily_taken = 0
+                user.daily_stood = 0
+                user.daily_failed = 0
+                user.daily_profit = 0
+                user.daily_date = today
 
-    session.commit()
-    session.close()
-    logger.info("Daily stats updated")
+        session.commit()
+        logger.info("Daily stats updated")
+    finally:
+        session.close()
 
 
 async def update_bot_stats():
     session = SessionLocal()
+    try:
+        stats = session.query(BotStats).first()
+        if not stats:
+            stats = BotStats()
+            session.add(stats)
 
-    stats = session.query(BotStats).first()
-    if not stats:
-        stats = BotStats()
-        session.add(stats)
+        stats.total_users = session.query(User).count()
+        stats.total_blocked = session.query(User).filter_by(is_blocked=True).count()
+        stats.total_balance = session.query(func.sum(User.balance)).scalar() or 0
+        stats.last_updated = datetime.now()
 
-    stats.total_users = session.query(User).count()
-    stats.total_blocked = session.query(User).filter_by(is_blocked=True).count()
-    stats.total_balance = session.query(func.sum(User.balance)).scalar() or 0
-    stats.last_updated = datetime.now()
-
-    session.commit()
-    session.close()
-    logger.info("Bot stats updated")
+        session.commit()
+        logger.info("Bot stats updated")
+    finally:
+        session.close()
 
 
 # ==================== СОБЫТИЯ ЗАПУСКА/ОСТАНОВКИ ====================
