@@ -28,7 +28,7 @@ from sqlalchemy.orm import sessionmaker, Session
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"
 CRYPTO_TOKEN = "YOUR_CRYPTO_TOKEN_HERE"
 ADMIN_IDS = [123456789]
 SUPPORT_LINK = "https://t.me/support_bot"
