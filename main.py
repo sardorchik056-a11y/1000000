@@ -2,18 +2,18 @@ import asyncio
 import logging
 import sqlite3
 import re
+import os
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
 from contextlib import contextmanager
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, 
-    InlineKeyboardButton, Message, CallbackQuery, FSInputFile
+    ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton,
+    Message, CallbackQuery, FSInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -35,22 +35,15 @@ dp = Dispatcher(storage=storage)
 # --- Состояния FSM ---
 
 class UserStates(StatesGroup):
-    # Сдать номер
     entering_phone = State()
     selecting_queue = State()
     confirm_number = State()
-    
-    # Вывод средств
     selecting_withdrawal = State()
-    
-    # Работяга - взять номер
     worker_select_method = State()
     worker_waiting_code = State()
     worker_waiting_photo = State()
     worker_waiting_qr = State()
     worker_confirm_stand = State()
-    
-    # Админ
     admin_add_worker = State()
     admin_edit_price = State()
     admin_set_photo = State()
@@ -63,7 +56,6 @@ DB_PATH = "babrito.db"
 
 @contextmanager
 def get_db():
-    """Контекстный менеджер для работы с БД"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -77,25 +69,22 @@ def get_db():
         conn.close()
 
 def init_db():
-    """Инициализация базы данных"""
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Таблица users
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER UNIQUE NOT NULL,
                 username TEXT,
                 balance REAL DEFAULT 0,
-                is_admin BOOLEAN DEFAULT 0,
-                is_worker BOOLEAN DEFAULT 0,
-                is_banned BOOLEAN DEFAULT 0,
+                is_admin INTEGER DEFAULT 0,
+                is_worker INTEGER DEFAULT 0,
+                is_banned INTEGER DEFAULT 0,
                 registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица numbers
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS numbers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,13 +97,12 @@ def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 started_at DATETIME,
                 finished_at DATETIME,
-                is_paid BOOLEAN DEFAULT 0,
+                is_paid INTEGER DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users (id),
                 FOREIGN KEY (worker_id) REFERENCES users (id)
             )
         ''')
         
-        # Таблица withdrawals
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +117,6 @@ def init_db():
             )
         ''')
         
-        # Таблица settings
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +125,6 @@ def init_db():
             )
         ''')
         
-        # Настройки по умолчанию
         default_settings = [
             ('price', '3.0'),
             ('vip_price', '1.5'),
@@ -153,17 +139,15 @@ def init_db():
                 (key, value)
             )
         
-        # Создаем администратора по умолчанию (если нужно)
-        # Замените YOUR_TELEGRAM_ID на ваш ID
+        # Создаем администратора (замените на свой ID)
         cursor.execute('''
             INSERT OR IGNORE INTO users (telegram_id, username, is_admin)
             VALUES (?, ?, 1)
         ''', (123456789, 'admin'))
 
-# --- Вспомогательные функции для работы с БД ---
+# --- Вспомогательные функции ---
 
 def get_setting(key: str) -> str:
-    """Получить настройку"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
@@ -171,7 +155,6 @@ def get_setting(key: str) -> str:
         return row['value'] if row else None
 
 def set_setting(key: str, value: str):
-    """Установить настройку"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -180,14 +163,18 @@ def set_setting(key: str, value: str):
         )
 
 def get_user(telegram_id: int):
-    """Получить пользователя по telegram_id"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM users WHERE telegram_id = ?', (telegram_id,))
         return cursor.fetchone()
 
+def get_user_by_id(user_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        return cursor.fetchone()
+
 def get_or_create_user(telegram_id: int, username: str = None):
-    """Получить или создать пользователя"""
     with get_db() as conn:
         cursor = conn.cursor()
         user = cursor.execute(
@@ -206,15 +193,22 @@ def get_or_create_user(telegram_id: int, username: str = None):
         
         return user
 
-def get_user_by_id(user_id: int):
-    """Получить пользователя по id"""
+def get_user_numbers(user_id: int, status: str = None):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        return cursor.fetchone()
+        if status:
+            cursor.execute(
+                'SELECT * FROM numbers WHERE user_id = ? AND status = ? ORDER BY created_at DESC',
+                (user_id, status)
+            )
+        else:
+            cursor.execute(
+                'SELECT * FROM numbers WHERE user_id = ? ORDER BY created_at DESC',
+                (user_id,)
+            )
+        return cursor.fetchall()
 
 def get_worker_numbers(worker_id: int, status: str = None):
-    """Получить номера работяги"""
     with get_db() as conn:
         cursor = conn.cursor()
         if status:
@@ -229,49 +223,23 @@ def get_worker_numbers(worker_id: int, status: str = None):
             )
         return cursor.fetchall()
 
-def get_user_numbers(user_id: int, status: str = None):
-    """Получить номера пользователя"""
+def get_next_number():
     with get_db() as conn:
         cursor = conn.cursor()
-        if status:
-            cursor.execute(
-                'SELECT * FROM numbers WHERE user_id = ? AND status = ?',
-                (user_id, status)
-            )
-        else:
-            cursor.execute(
-                'SELECT * FROM numbers WHERE user_id = ?',
-                (user_id,)
-            )
-        return cursor.fetchall()
-
-def get_next_number(queue_type: str = None):
-    """Получить следующий номер из очереди"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if queue_type:
-            cursor.execute('''
-                SELECT * FROM numbers 
-                WHERE status = 'waiting' AND queue_type = ?
-                ORDER BY created_at ASC LIMIT 1
-            ''', (queue_type,))
-        else:
-            # Сначала VIP, потом обычные
-            cursor.execute('''
-                SELECT * FROM numbers 
-                WHERE status = 'waiting'
-                ORDER BY 
-                    CASE queue_type 
-                        WHEN 'vip' THEN 1 
-                        WHEN 'regular' THEN 2 
-                    END,
-                    created_at ASC 
-                LIMIT 1
-            ''')
+        cursor.execute('''
+            SELECT * FROM numbers 
+            WHERE status = 'waiting'
+            ORDER BY 
+                CASE queue_type 
+                    WHEN 'vip' THEN 1 
+                    WHEN 'regular' THEN 2 
+                END,
+                created_at ASC 
+            LIMIT 1
+        ''')
         return cursor.fetchone()
 
 def add_balance(telegram_id: int, amount: float):
-    """Добавить баланс пользователю"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -279,19 +247,18 @@ def add_balance(telegram_id: int, amount: float):
             (amount, telegram_id)
         )
 
-def subtract_balance(telegram_id: int, amount: float):
-    """Списать баланс"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE users SET balance = balance - ? WHERE telegram_id = ? AND balance >= ?',
-            (amount, telegram_id, amount)
-        )
+def get_user_role(user):
+    if not user:
+        return "Пользователь"
+    if user['is_admin']:
+        return "Администратор"
+    if user['is_worker']:
+        return "Работяга"
+    return "Пользователь"
 
 # --- Клавиатуры ---
 
 def get_main_keyboard(telegram_id: int):
-    """Главное меню"""
     user = get_user(telegram_id)
     buttons = [
         [KeyboardButton(text="📱 Сдать номер")],
@@ -312,7 +279,6 @@ def get_main_keyboard(telegram_id: int):
     )
 
 def get_admin_keyboard():
-    """Админ панель"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Статистика")],
@@ -332,7 +298,6 @@ def get_admin_keyboard():
     )
 
 def get_worker_keyboard():
-    """Панель работяги"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Взять номер")],
@@ -343,7 +308,6 @@ def get_worker_keyboard():
     )
 
 def get_withdrawal_keyboard():
-    """Клавиатура для вывода средств"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="10$", callback_data="withdraw_10"),
@@ -360,7 +324,6 @@ def get_withdrawal_keyboard():
     return builder.as_markup()
 
 def get_queue_keyboard():
-    """Выбор очереди"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="⚡ VIP (вне очереди) 1.5$", callback_data="queue_vip"),
@@ -371,11 +334,10 @@ def get_queue_keyboard():
     )
     return builder.as_markup()
 
-def get_confirm_keyboard(number: str, queue_type: str, price: float):
-    """Подтверждение добавления номера"""
+def get_confirm_keyboard(phone: str, queue_type: str, price: float):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{number}_{queue_type}_{price}")
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{phone}_{queue_type}_{price}")
     )
     builder.row(
         InlineKeyboardButton(text="❌ Отмена", callback_data="confirm_cancel")
@@ -383,7 +345,6 @@ def get_confirm_keyboard(number: str, queue_type: str, price: float):
     return builder.as_markup()
 
 def get_worker_method_keyboard():
-    """Способы конекта для работяги"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="🔄 Перенос (Код)", callback_data="method_transfer"),
@@ -396,7 +357,6 @@ def get_worker_method_keyboard():
     return builder.as_markup()
 
 def get_worker_stand_keyboard():
-    """Кнопки для работяги после получения кода"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Встал", callback_data="stand_yes"),
@@ -405,7 +365,6 @@ def get_worker_stand_keyboard():
     return builder.as_markup()
 
 def get_worker_fly_keyboard(number_id: int):
-    """Кнопка слета"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="💥 Слет", callback_data=f"fly_{number_id}")
@@ -413,7 +372,6 @@ def get_worker_fly_keyboard(number_id: int):
     return builder.as_markup()
 
 def get_user_action_keyboard(number_id: int):
-    """Кнопки для пользователя"""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Сделал", callback_data=f"user_done_{number_id}")
@@ -424,7 +382,6 @@ def get_user_action_keyboard(number_id: int):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработчик команды /start"""
     await state.clear()
     
     user = get_or_create_user(
@@ -432,20 +389,21 @@ async def cmd_start(message: Message, state: FSMContext):
         message.from_user.username
     )
     
-    price = get_setting('price')
+    price = get_setting('price') or '3.0'
     welcome_photo = get_setting('welcome_photo')
+    
+    role = get_user_role(user)
     
     welcome_text = (
         f"👋 Добро пожаловать в Babrito WA!\n\n"
         f"👤 Username: @{message.from_user.username or 'Не указан'}\n"
         f"💰 Текущая цена за аккаунт: {price}$\n"
         f"💵 Баланс: {user['balance']}$\n"
-        f"🎭 Роль: {'Администратор' if user['is_admin'] else 'Работяга' if user['is_worker'] else 'Пользователь'}\n\n"
+        f"🎭 Роль: {role}\n\n"
         "Выберите действие:"
     )
     
-    # Отправляем фото если оно установлено
-    if welcome_photo:
+    if welcome_photo and os.path.exists(welcome_photo):
         try:
             photo = FSInputFile(welcome_photo)
             await message.answer_photo(
@@ -464,7 +422,6 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
-    """Админ панель"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа к админ-панели.")
@@ -478,7 +435,6 @@ async def cmd_admin(message: Message, state: FSMContext):
 
 @dp.message(Command("rabotyaga"))
 async def cmd_worker(message: Message, state: FSMContext):
-    """Панель работяги"""
     user = get_user(message.from_user.id)
     if not user or not user['is_worker']:
         await message.answer("⛔ У вас нет доступа к панели работяги.")
@@ -490,12 +446,22 @@ async def cmd_worker(message: Message, state: FSMContext):
         reply_markup=get_worker_keyboard()
     )
 
+@dp.message(Command("cancel"))
+async def cancel_command(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "❌ Действие отменено.",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
 # --- Обработчики главного меню ---
 
 @dp.message(F.text == "📱 Сдать номер")
 async def sell_number(message: Message, state: FSMContext):
-    """Начало процесса сдачи номера"""
     user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("❌ Ошибка: пользователь не найден.")
+        return
     if user['is_banned']:
         await message.answer("⛔ Вы заблокированы.")
         return
@@ -511,24 +477,11 @@ async def sell_number(message: Message, state: FSMContext):
         "Для отмены отправьте /cancel"
     )
 
-@dp.message(Command("cancel"))
-async def cancel_command(message: Message, state: FSMContext):
-    """Отмена текущего действия"""
-    await state.clear()
-    await message.answer(
-        "❌ Действие отменено.",
-        reply_markup=get_main_keyboard(message.from_user.id)
-    )
-
 @dp.message(UserStates.entering_phone)
 async def process_phone(message: Message, state: FSMContext):
-    """Обработка ввода номера"""
     phone = message.text.strip()
-    
-    # Очистка номера от лишних символов
     cleaned = re.sub(r'[+\s()\-]', '', phone)
     
-    # Проверка и форматирование
     if len(cleaned) == 10 and cleaned.startswith('7'):
         formatted = cleaned
     elif len(cleaned) == 10 and cleaned.startswith('8'):
@@ -556,17 +509,13 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("queue_"))
 async def select_queue(callback: CallbackQuery, state: FSMContext):
-    """Выбор очереди"""
     queue_type = callback.data.split("_")[1]
     
     if queue_type == "back":
         await state.clear()
-        await callback.message.edit_text(
-            "Главное меню",
-            reply_markup=None
-        )
+        await callback.message.delete()
         await callback.message.answer(
-            "Вы вернулись в главное меню.",
+            "Главное меню",
             reply_markup=get_main_keyboard(callback.from_user.id)
         )
         await callback.answer()
@@ -575,8 +524,10 @@ async def select_queue(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     phone = data.get('phone')
     
-    # ИСПРАВЛЕННАЯ СТРОКА:
-    price = float(get_setting('vip_price') if queue_type == 'vip' else get_setting('price'))
+    if queue_type == 'vip':
+        price = float(get_setting('vip_price') or '1.5')
+    else:
+        price = float(get_setting('price') or '3.0')
     
     await state.update_data(queue_type=queue_type, price=price)
     await state.set_state(UserStates.confirm_number)
@@ -602,13 +553,17 @@ async def select_queue(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_number(callback: CallbackQuery, state: FSMContext):
-    """Подтверждение добавления номера"""
-    _, phone, queue_type, price = callback.data.split("_")
-    price = float(price)
+    parts = callback.data.split("_")
+    phone = parts[1]
+    queue_type = parts[2]
+    price = float(parts[3])
     
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
     
-    # Добавляем номер в базу
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -616,12 +571,11 @@ async def confirm_number(callback: CallbackQuery, state: FSMContext):
             VALUES (?, ?, ?, ?, 'waiting')
         ''', (user['id'], phone, queue_type, price))
         conn.commit()
-        number_id = cursor.lastrowid
     
     await state.clear()
     
     await callback.message.edit_text(
-        f"✅ Номер +{phone} успешно добавлен в очередь {queue_type}!\n"
+        f"✅ Номер +{phone} успешно добавлен в очередь!\n"
         f"💵 Цена: {price}$\n"
         f"📊 Статус: Ожидание",
         reply_markup=None
@@ -634,7 +588,6 @@ async def confirm_number(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_cancel")
 async def confirm_cancel(callback: CallbackQuery, state: FSMContext):
-    """Отмена добавления номера"""
     await state.clear()
     await callback.message.edit_text(
         "❌ Добавление номера отменено.",
@@ -646,23 +599,24 @@ async def confirm_cancel(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- Обработчики кнопок главного меню ---
+# --- Профиль ---
 
 @dp.message(F.text == "👤 Профиль")
 async def profile(message: Message):
-    """Профиль пользователя"""
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("❌ Ошибка: пользователь не найден.")
         return
     
+    role = get_user_role(user)
+    
     text = (
         f"👤 Профиль\n\n"
         f"🔹 Username: @{message.from_user.username or 'Не указан'}\n"
-        f"💰 Цена за аккаунт: {get_setting('price')}$\n"
+        f"💰 Цена за аккаунт: {get_setting('price') or '3.0'}$\n"
         f"💵 Баланс: {user['balance']}$\n"
         f"📅 Дата регистрации: {user['registered_at']}\n"
-        f"🎭 Роль: {'Администратор' if user['is_admin'] else 'Работяга' if user['is_worker'] else 'Пользователь'}"
+        f"🎭 Роль: {role}"
     )
     
     builder = InlineKeyboardBuilder()
@@ -679,8 +633,11 @@ async def profile(message: Message):
 
 @dp.message(F.text == "📋 Моя очередь")
 async def my_queue(message: Message):
-    """Моя очередь"""
     user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("❌ Ошибка: пользователь не найден.")
+        return
+    
     numbers = get_user_numbers(user['id'])
     
     if not numbers:
@@ -688,10 +645,7 @@ async def my_queue(message: Message):
         return
     
     text = "📋 Моя очередь:\n\n"
-    queue_names = {
-        'vip': '⚡ VIP',
-        'regular': '💰 Обычная'
-    }
+    queue_names = {'vip': '⚡ VIP', 'regular': '💰 Обычная'}
     status_names = {
         'waiting': '⏳ Ожидает',
         'in_progress': '🔄 В работе',
@@ -699,7 +653,7 @@ async def my_queue(message: Message):
         'failed': '❌ Слет'
     }
     
-    for num in numbers[:10]:  # Показываем последние 10
+    for num in numbers[:10]:
         text += (
             f"📱 +{num['phone_number']}\n"
             f"📋 {queue_names.get(num['queue_type'], num['queue_type'])}\n"
@@ -715,7 +669,6 @@ async def my_queue(message: Message):
 
 @dp.message(F.text == "🆘 Тех поддержка")
 async def support(message: Message):
-    """Тех поддержка"""
     await message.answer(
         "🆘 Тех поддержка\n\n"
         "Если у вас возникли вопросы или проблемы, обратитесь в нашу службу поддержки:\n"
@@ -723,11 +676,10 @@ async def support(message: Message):
         "Мы всегда рады помочь! 😊"
     )
 
-# --- Профиль (callback) ---
+# --- Профиль callback ---
 
 @dp.callback_query(F.data == "profile_back")
 async def profile_back(callback: CallbackQuery):
-    """Назад из профиля"""
     await callback.message.delete()
     await callback.message.answer(
         "Главное меню",
@@ -737,8 +689,12 @@ async def profile_back(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "profile_queue")
 async def profile_queue(callback: CallbackQuery):
-    """Моя очередь из профиля"""
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
+    
     numbers = get_user_numbers(user['id'])
     
     if not numbers:
@@ -747,10 +703,7 @@ async def profile_queue(callback: CallbackQuery):
         return
     
     text = "📋 Моя очередь:\n\n"
-    queue_names = {
-        'vip': '⚡ VIP',
-        'regular': '💰 Обычная'
-    }
+    queue_names = {'vip': '⚡ VIP', 'regular': '💰 Обычная'}
     status_names = {
         'waiting': '⏳ Ожидает',
         'in_progress': '🔄 В работе',
@@ -775,13 +728,14 @@ async def profile_queue(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "profile_stats")
 async def profile_stats(callback: CallbackQuery):
-    """Статистика пользователя"""
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
     
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # За сегодня
         today = datetime.now().strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT 
@@ -794,7 +748,6 @@ async def profile_stats(callback: CallbackQuery):
         ''', (user['id'], today))
         today_stats = cursor.fetchone()
         
-        # За всё время
         cursor.execute('''
             SELECT 
                 COUNT(*) as total,
@@ -806,7 +759,6 @@ async def profile_stats(callback: CallbackQuery):
         ''', (user['id'],))
         all_stats = cursor.fetchone()
         
-        # Прибыль (только выполненные номера)
         cursor.execute('''
             SELECT COALESCE(SUM(price), 0) as profit
             FROM numbers 
@@ -824,9 +776,13 @@ async def profile_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "profile_withdraw")
 async def profile_withdraw(callback: CallbackQuery, state: FSMContext):
-    """Вывод средств"""
     user = get_user(callback.from_user.id)
-    min_withdrawal = float(get_setting('min_withdrawal'))
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
+    
+    min_withdrawal = float(get_setting('min_withdrawal') or '10')
     
     if user['balance'] < min_withdrawal:
         await callback.message.answer(
@@ -852,9 +808,13 @@ async def profile_withdraw(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("withdraw_"), UserStates.selecting_withdrawal)
 async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
-    """Обработка вывода средств"""
     action = callback.data.split("_")[1]
     user = get_user(callback.from_user.id)
+    
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
     
     if action == "back":
         await state.clear()
@@ -880,8 +840,7 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Создаем запись о выводе
-    check_id = f"check_{user['telegram_id']}_{datetime.now().timestamp()}"
+    check_id = f"check_{user['telegram_id']}_{int(datetime.now().timestamp())}"
     expires_at = datetime.now() + timedelta(hours=1)
     
     with get_db() as conn:
@@ -901,8 +860,7 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
         f"🆔 ID чека: {check_id}\n"
         f"⏳ Срок действия: 1 час\n\n"
         f"🔗 Ссылка для активации: https://t.me/CryptoBot?start={check_id}\n\n"
-        f"⚠️ Чек будет действителен в течение 1 часа.\n"
-        f"После активации средства будут автоматически зачислены."
+        f"⚠️ Чек будет действителен в течение 1 часа."
     )
     
     builder = InlineKeyboardBuilder()
@@ -919,7 +877,6 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("check_status_"))
 async def check_withdrawal_status(callback: CallbackQuery):
-    """Проверка статуса вывода"""
     _, withdrawal_id = callback.data.split("_")
     
     with get_db() as conn:
@@ -950,7 +907,6 @@ async def check_withdrawal_status(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "check_back")
 async def check_back(callback: CallbackQuery):
-    """Назад из чека"""
     await callback.message.delete()
     await callback.message.answer(
         "Главное меню",
@@ -962,7 +918,6 @@ async def check_back(callback: CallbackQuery):
 
 @dp.message(F.text == "⚙️ Админ панель")
 async def admin_panel(message: Message, state: FSMContext):
-    """Админ панель"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -976,7 +931,6 @@ async def admin_panel(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🔙 Закрыть")
 async def close_admin(message: Message, state: FSMContext):
-    """Закрыть админ панель"""
     await state.clear()
     await message.answer(
         "Главное меню",
@@ -987,7 +941,6 @@ async def close_admin(message: Message, state: FSMContext):
 
 @dp.message(F.text == "📊 Статистика")
 async def admin_stats(message: Message):
-    """Статистика для админа"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -995,23 +948,17 @@ async def admin_stats(message: Message):
     
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Всего пользователей
         cursor.execute('SELECT COUNT(*) as count FROM users')
         total_users = cursor.fetchone()['count']
         
-        # Заблокировано
         cursor.execute('SELECT COUNT(*) as count FROM users WHERE is_banned = 1')
         banned_users = cursor.fetchone()['count']
         
-        # Общий баланс
         cursor.execute('SELECT COALESCE(SUM(balance), 0) as total FROM users')
         total_balance = cursor.fetchone()['total']
         
-        # Казнa
-        treasury = float(get_setting('treasury_balance'))
+        treasury = float(get_setting('treasury_balance') or '0')
         
-        # Статистика по номерам
         cursor.execute('''
             SELECT 
                 COUNT(*) as total,
@@ -1022,7 +969,6 @@ async def admin_stats(message: Message):
         ''')
         stats = cursor.fetchone()
         
-        # Прибыль
         cursor.execute('SELECT COALESCE(SUM(price), 0) as profit FROM numbers WHERE status = "completed" AND is_paid = 1')
         profit = cursor.fetchone()['profit']
     
@@ -1045,7 +991,6 @@ async def admin_stats(message: Message):
 
 @dp.message(F.text == "👥 Пользователи")
 async def admin_users(message: Message):
-    """Список пользователей для админа"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1076,7 +1021,6 @@ async def admin_users(message: Message):
 
 @dp.message(F.text == "💰 Балансы")
 async def admin_balances(message: Message):
-    """Топ-10 балансов"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1106,13 +1050,12 @@ async def admin_balances(message: Message):
 
 @dp.message(F.text == "💰 Пополнить казну")
 async def admin_treasury(message: Message, state: FSMContext):
-    """Пополнение казны"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
         return
     
-    treasury = float(get_setting('treasury_balance'))
+    treasury = float(get_setting('treasury_balance') or '0')
     
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -1137,7 +1080,6 @@ async def admin_treasury(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("treasury_"))
 async def process_treasury(callback: CallbackQuery):
-    """Обработка пополнения казны"""
     action = callback.data.split("_")[1]
     
     if action == "back":
@@ -1150,7 +1092,7 @@ async def process_treasury(callback: CallbackQuery):
         return
     
     amount = float(action)
-    treasury = float(get_setting('treasury_balance'))
+    treasury = float(get_setting('treasury_balance') or '0')
     new_treasury = treasury + amount
     set_setting('treasury_balance', str(new_treasury))
     
@@ -1159,17 +1101,12 @@ async def process_treasury(callback: CallbackQuery):
         f"🏦 Новый баланс: {new_treasury}$",
         reply_markup=None
     )
-    
-    # Здесь должна быть интеграция с CryptoBot для создания счета
-    # и проверки оплаты
-    
     await callback.answer()
 
 # --- Админ: Рассылка ---
 
 @dp.message(F.text == "📨 Рассылка")
 async def admin_broadcast(message: Message, state: FSMContext):
-    """Рассылка"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1183,7 +1120,6 @@ async def admin_broadcast(message: Message, state: FSMContext):
 
 @dp.message(UserStates.admin_broadcast)
 async def process_broadcast(message: Message, state: FSMContext):
-    """Отправка рассылки"""
     text = message.text
     
     with get_db() as conn:
@@ -1198,7 +1134,7 @@ async def process_broadcast(message: Message, state: FSMContext):
         try:
             await bot.send_message(user['telegram_id'], text)
             sent += 1
-            await asyncio.sleep(0.05)  # Чтобы не превысить лимиты
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"Broadcast error to {user['telegram_id']}: {e}")
             errors += 1
@@ -1214,7 +1150,6 @@ async def process_broadcast(message: Message, state: FSMContext):
 
 @dp.message(F.text == "📊 История выводов")
 async def admin_withdrawals(message: Message):
-    """История выводов"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1236,11 +1171,7 @@ async def admin_withdrawals(message: Message):
         return
     
     text = "📊 Последние 20 выводов:\n\n"
-    status_icons = {
-        'pending': '⏳',
-        'completed': '✅',
-        'expired': '❌'
-    }
+    status_icons = {'pending': '⏳', 'completed': '✅', 'expired': '❌'}
     
     for w in withdrawals:
         text += (
@@ -1256,7 +1187,6 @@ async def admin_withdrawals(message: Message):
 
 @dp.message(F.text == "💥 Расчет оплат")
 async def admin_calculate_payments(message: Message):
-    """Расчет оплат для обычных номеров"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1264,8 +1194,6 @@ async def admin_calculate_payments(message: Message):
     
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Находим все неоплаченные обычные номера со статусом "completed"
         cursor.execute('''
             SELECT n.*, u.telegram_id 
             FROM numbers n
@@ -1284,19 +1212,11 @@ async def admin_calculate_payments(message: Message):
     paid_count = 0
     
     for num in numbers:
-        # Начисляем средства пользователю
         add_balance(num['telegram_id'], num['price'])
-        
-        # Отмечаем номер как оплаченный
-        cursor.execute(
-            'UPDATE numbers SET is_paid = 1 WHERE id = ?',
-            (num['id'],)
-        )
-        
+        cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (num['id'],))
         total_amount += num['price']
         paid_count += 1
         
-        # Уведомляем пользователя
         try:
             await bot.send_message(
                 num['telegram_id'],
@@ -1316,14 +1236,13 @@ async def admin_calculate_payments(message: Message):
 
 @dp.message(F.text == "📝 Редактировать прайс")
 async def admin_edit_price(message: Message, state: FSMContext):
-    """Редактирование прайса"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
         return
     
-    current_price = get_setting('price')
-    current_vip_price = get_setting('vip_price')
+    current_price = get_setting('price') or '3.0'
+    current_vip_price = get_setting('vip_price') or '1.5'
     
     await state.set_state(UserStates.admin_edit_price)
     await message.answer(
@@ -1336,7 +1255,6 @@ async def admin_edit_price(message: Message, state: FSMContext):
 
 @dp.message(UserStates.admin_edit_price)
 async def process_edit_price(message: Message, state: FSMContext):
-    """Обработка изменения прайса"""
     try:
         price = float(message.text)
         if price <= 0:
@@ -1345,10 +1263,7 @@ async def process_edit_price(message: Message, state: FSMContext):
         
         set_setting('price', str(price))
         await state.clear()
-        await message.answer(
-            f"✅ Цена обновлена!\n"
-            f"💰 Новая цена: {price}$"
-        )
+        await message.answer(f"✅ Цена обновлена!\n💰 Новая цена: {price}$")
     except ValueError:
         await message.answer("❌ Пожалуйста, введите число.")
 
@@ -1356,7 +1271,6 @@ async def process_edit_price(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🖼 Установить фото")
 async def admin_set_photo(message: Message, state: FSMContext):
-    """Установка приветственного фото"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1371,35 +1285,25 @@ async def admin_set_photo(message: Message, state: FSMContext):
 
 @dp.message(UserStates.admin_set_photo, F.photo)
 async def process_set_photo(message: Message, state: FSMContext):
-    """Обработка установки фото"""
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     
-    # Сохраняем фото локально
-    file_path = f"welcome_photo_{message.from_user.id}.jpg"
+    file_path = f"welcome_photo.jpg"
     await bot.download_file(file.file_path, file_path)
     
     set_setting('welcome_photo', file_path)
     await state.clear()
     
-    await message.answer(
-        "✅ Приветственное фото установлено!\n"
-        "Теперь оно будет отображаться при запуске бота."
-    )
+    await message.answer("✅ Приветственное фото установлено!")
 
 @dp.message(UserStates.admin_set_photo)
 async def set_photo_invalid(message: Message):
-    """Неверный формат для фото"""
-    await message.answer(
-        "❌ Пожалуйста, отправьте фото.\n\n"
-        "Для отмены отправьте /cancel"
-    )
+    await message.answer("❌ Пожалуйста, отправьте фото.\n\nДля отмены отправьте /cancel")
 
 # --- Админ: Добавить работягу ---
 
 @dp.message(F.text == "➕ Добавить работягу")
 async def admin_add_worker(message: Message, state: FSMContext):
-    """Добавление работяги"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1414,7 +1318,6 @@ async def admin_add_worker(message: Message, state: FSMContext):
 
 @dp.message(UserStates.admin_add_worker)
 async def process_add_worker(message: Message, state: FSMContext):
-    """Обработка добавления работяги"""
     try:
         telegram_id = int(message.text.strip())
     except ValueError:
@@ -1432,17 +1335,11 @@ async def process_add_worker(message: Message, state: FSMContext):
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE users SET is_worker = 1 WHERE telegram_id = ?',
-            (telegram_id,)
-        )
+        cursor.execute('UPDATE users SET is_worker = 1 WHERE telegram_id = ?', (telegram_id,))
     
     await state.clear()
-    await message.answer(
-        f"✅ Пользователь @{user['username'] or 'Не указан'} назначен работягой!"
-    )
+    await message.answer(f"✅ Пользователь @{user['username'] or 'Не указан'} назначен работягой!")
     
-    # Уведомляем пользователя
     try:
         await bot.send_message(
             telegram_id,
@@ -1456,7 +1353,6 @@ async def process_add_worker(message: Message, state: FSMContext):
 
 @dp.message(F.text == "📋 Список работяг")
 async def admin_workers_list(message: Message):
-    """Список работяг"""
     user = get_user(message.from_user.id)
     if not user or not user['is_admin']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1464,10 +1360,7 @@ async def admin_workers_list(message: Message):
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM users 
-            WHERE is_worker = 1
-        ''')
+        cursor.execute('SELECT * FROM users WHERE is_worker = 1')
         workers = cursor.fetchall()
     
     if not workers:
@@ -1489,7 +1382,6 @@ async def admin_workers_list(message: Message):
 
 @dp.message(F.text == "🔧 Панель работяги")
 async def worker_panel(message: Message, state: FSMContext):
-    """Панель работяги"""
     user = get_user(message.from_user.id)
     if not user or not user['is_worker']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1503,7 +1395,6 @@ async def worker_panel(message: Message, state: FSMContext):
 
 @dp.message(F.text == "❌ Закрыть")
 async def close_worker(message: Message, state: FSMContext):
-    """Закрыть панель работяги"""
     await state.clear()
     await message.answer(
         "Главное меню",
@@ -1512,28 +1403,21 @@ async def close_worker(message: Message, state: FSMContext):
 
 @dp.message(F.text == "📱 Взять номер")
 async def worker_take_number(message: Message, state: FSMContext):
-    """Взять номер"""
     user = get_user(message.from_user.id)
     if not user or not user['is_worker']:
         await message.answer("⛔ У вас нет доступа.")
         return
     
-    # Проверяем есть ли уже активный номер у работяги
     active_numbers = get_worker_numbers(user['id'], 'in_progress')
     if active_numbers:
-        await message.answer(
-            "❌ У вас уже есть активный номер!\n"
-            "Сначала завершите работу с текущим номером."
-        )
+        await message.answer("❌ У вас уже есть активный номер!\nСначала завершите работу с текущим номером.")
         return
     
-    # Ищем следующий номер в очереди
     number = get_next_number()
     if not number:
         await message.answer("📭 Очередь пуста. Нет номеров для взятия.")
         return
     
-    # Обновляем номер
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -1545,10 +1429,7 @@ async def worker_take_number(message: Message, state: FSMContext):
     await state.update_data(number_id=number['id'])
     await state.set_state(UserStates.worker_select_method)
     
-    queue_names = {
-        'vip': '⚡ VIP',
-        'regular': '💰 Обычная'
-    }
+    queue_names = {'vip': '⚡ VIP', 'regular': '💰 Обычная'}
     
     await message.answer(
         f"📱 Номер: +{number['phone_number']}\n"
@@ -1560,15 +1441,11 @@ async def worker_take_number(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("method_"), UserStates.worker_select_method)
 async def worker_select_method(callback: CallbackQuery, state: FSMContext):
-    """Выбор метода конекта"""
     method = callback.data.split("_")[1]
     
     if method == "cancel":
         await state.clear()
-        await callback.message.edit_text(
-            "❌ Взятие номера отменено.",
-            reply_markup=None
-        )
+        await callback.message.edit_text("❌ Взятие номера отменено.", reply_markup=None)
         await callback.message.answer(
             "Главное меню",
             reply_markup=get_main_keyboard(callback.from_user.id)
@@ -1583,11 +1460,18 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
         number = cursor.fetchone()
-        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
-        user = cursor.fetchone()
+        if number:
+            cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+            user = cursor.fetchone()
+        else:
+            user = None
+    
+    if not number or not user:
+        await callback.message.answer("❌ Ошибка: номер не найден.")
+        await callback.answer()
+        return
     
     if method == "transfer":
-        # Перенос (Код)
         await state.update_data(method='transfer')
         await state.set_state(UserStates.worker_waiting_code)
         
@@ -1598,7 +1482,6 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
             "Пользователь получил запрос на ввод кода."
         )
         
-        # Запрашиваем код у пользователя
         try:
             await bot.send_message(
                 user['telegram_id'],
@@ -1612,7 +1495,6 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         return
     
     elif method == "link":
-        # Связ - ждем фото от работяги
         await state.update_data(method='link')
         await state.set_state(UserStates.worker_waiting_photo)
         
@@ -1625,7 +1507,6 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         return
     
     elif method == "qr":
-        # Кюар - ждем QR от работяги
         await state.update_data(method='qr')
         await state.set_state(UserStates.worker_waiting_qr)
         
@@ -1641,7 +1522,6 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(UserStates.worker_waiting_code)
 async def worker_receive_code(message: Message, state: FSMContext):
-    """Получение кода от работяги"""
     code = message.text.strip()
     data = await state.get_data()
     number_id = data.get('number_id')
@@ -1655,7 +1535,10 @@ async def worker_receive_code(message: Message, state: FSMContext):
         cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
         number = cursor.fetchone()
     
-    # Отправляем код работяге
+    if not number:
+        await message.answer("❌ Номер не найден.")
+        return
+    
     await message.answer(
         f"✅ Код получен!\n"
         f"📱 Номер: +{number['phone_number']}\n"
@@ -1671,7 +1554,6 @@ async def worker_receive_code(message: Message, state: FSMContext):
 
 @dp.message(UserStates.worker_waiting_photo, F.photo)
 async def worker_receive_photo(message: Message, state: FSMContext):
-    """Получение фото для связки"""
     data = await state.get_data()
     number_id = data.get('number_id')
     
@@ -1679,16 +1561,21 @@ async def worker_receive_photo(message: Message, state: FSMContext):
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
         number = cursor.fetchone()
-        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
-        user = cursor.fetchone()
+        if number:
+            cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+            user = cursor.fetchone()
+        else:
+            user = None
     
-    # Получаем фото
+    if not number or not user:
+        await message.answer("❌ Ошибка: номер не найден.")
+        return
+    
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
-    file_path = f"link_photo_{number_id}_{message.from_user.id}.jpg"
+    file_path = f"link_photo_{number_id}.jpg"
     await bot.download_file(file.file_path, file_path)
     
-    # Отправляем фото пользователю
     try:
         await bot.send_photo(
             user['telegram_id'],
@@ -1710,14 +1597,12 @@ async def worker_receive_photo(message: Message, state: FSMContext):
 
 @dp.message(UserStates.worker_waiting_photo)
 async def worker_photo_invalid(message: Message):
-    """Неверный формат для фото"""
     await message.answer("❌ Пожалуйста, отправьте фото для связки.")
 
 # --- Работяга: Кюар ---
 
 @dp.message(UserStates.worker_waiting_qr, F.photo)
 async def worker_receive_qr(message: Message, state: FSMContext):
-    """Получение QR-кода"""
     data = await state.get_data()
     number_id = data.get('number_id')
     
@@ -1725,16 +1610,21 @@ async def worker_receive_qr(message: Message, state: FSMContext):
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
         number = cursor.fetchone()
-        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
-        user = cursor.fetchone()
+        if number:
+            cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+            user = cursor.fetchone()
+        else:
+            user = None
     
-    # Получаем QR
+    if not number or not user:
+        await message.answer("❌ Ошибка: номер не найден.")
+        return
+    
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
-    file_path = f"qr_{number_id}_{message.from_user.id}.jpg"
+    file_path = f"qr_{number_id}.jpg"
     await bot.download_file(file.file_path, file_path)
     
-    # Отправляем QR пользователю
     try:
         await bot.send_photo(
             user['telegram_id'],
@@ -1756,17 +1646,14 @@ async def worker_receive_qr(message: Message, state: FSMContext):
 
 @dp.message(UserStates.worker_waiting_qr)
 async def worker_qr_invalid(message: Message):
-    """Неверный формат для QR"""
     await message.answer("❌ Пожалуйста, отправьте QR-код (фото).")
 
 # --- Пользователь: Подтверждение выполнения ---
 
 @dp.callback_query(F.data.startswith("user_done_"))
 async def user_done(callback: CallbackQuery):
-    """Пользователь подтверждает выполнение"""
     _, number_id = callback.data.split("_")
     
-    # Уведомляем работягу
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
@@ -1777,7 +1664,6 @@ async def user_done(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Находим работягу
     worker = get_user_by_id(number['worker_id'])
     if worker:
         try:
@@ -1802,17 +1688,13 @@ async def user_done(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stand_yes", UserStates.worker_confirm_stand)
 async def worker_stand_yes(callback: CallbackQuery, state: FSMContext):
-    """Работяга подтверждает встал"""
     data = await state.get_data()
     number_id = data.get('number_id')
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE numbers 
-            SET started_at = CURRENT_TIMESTAMP 
-            WHERE id = ?
-        ''', (number_id,))
+        cursor.execute('UPDATE numbers SET started_at = CURRENT_TIMESTAMP WHERE id = ?', (number_id,))
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
         number = cursor.fetchone()
     
     await state.clear()
@@ -1828,11 +1710,9 @@ async def worker_stand_yes(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "stand_no", UserStates.worker_confirm_stand)
 async def worker_stand_no(callback: CallbackQuery, state: FSMContext):
-    """Ошибка - номер не встал"""
     data = await state.get_data()
     number_id = data.get('number_id')
     
-    # Возвращаем номер в очередь
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -1858,7 +1738,6 @@ async def worker_stand_no(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("fly_"))
 async def worker_fly(callback: CallbackQuery, state: FSMContext):
-    """Слет номера"""
     _, number_id = callback.data.split("_")
     
     with get_db() as conn:
@@ -1871,21 +1750,19 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Вычисляем время работы
-        started = datetime.strptime(number['started_at'], '%Y-%m-%d %H:%M:%S')
-        finished = datetime.now()
-        minutes = (finished - started).total_seconds() / 60
+        if number['started_at']:
+            started = datetime.strptime(number['started_at'], '%Y-%m-%d %H:%M:%S')
+            finished = datetime.now()
+            minutes = (finished - started).total_seconds() / 60
+        else:
+            minutes = 0
         
-        # Определяем статус
         if minutes >= 10:
             status = 'completed'
-            # Начисление зависит от типа очереди
             if number['queue_type'] == 'vip':
-                # VIP - начисляем сразу
                 add_balance(number['user_id'], number['price'])
                 cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (number_id,))
                 
-                # Уведомляем пользователя
                 try:
                     await bot.send_message(
                         number['user_id'],
@@ -1898,14 +1775,12 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
         else:
             status = 'failed'
         
-        # Обновляем номер
         cursor.execute('''
             UPDATE numbers 
             SET status = ?, finished_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (status, number_id))
     
-    # Ответ работяге
     status_text = "✅ Отстоял" if status == 'completed' else "❌ Слет"
     price_text = f"💰 Начислено: {number['price']}$" if status == 'completed' else "💰 Начислено: 0$"
     
@@ -1918,7 +1793,6 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
         reply_markup=None
     )
     
-    # Уведомляем пользователя о слете
     if status == 'failed':
         try:
             await bot.send_message(
@@ -1930,7 +1804,6 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.error(f"Error notifying user about fly: {e}")
     
-    # Возвращаемся в панель работяги
     await callback.message.answer(
         "🔧 Панель работяги",
         reply_markup=get_worker_keyboard()
@@ -1941,7 +1814,6 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(F.text == "📊 Моя статистика")
 async def worker_stats(message: Message):
-    """Статистика работяги"""
     user = get_user(message.from_user.id)
     if not user or not user['is_worker']:
         await message.answer("⛔ У вас нет доступа.")
@@ -1949,8 +1821,6 @@ async def worker_stats(message: Message):
     
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # За сегодня
         today = datetime.now().strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT 
@@ -1963,7 +1833,6 @@ async def worker_stats(message: Message):
         ''', (user['id'], today))
         today_stats = cursor.fetchone()
         
-        # За всё время
         cursor.execute('''
             SELECT 
                 COUNT(*) as total,
@@ -1975,7 +1844,6 @@ async def worker_stats(message: Message):
         ''', (user['id'],))
         all_stats = cursor.fetchone()
         
-        # Заработок (только выполненные)
         cursor.execute('''
             SELECT COALESCE(SUM(price), 0) as earnings
             FROM numbers 
@@ -1986,18 +1854,12 @@ async def worker_stats(message: Message):
     today_text = f"За сегодня:\n• Взято: {today_stats['total']}\n• Отстояло: {today_stats['completed']}\n• Слетело: {today_stats['failed']}"
     all_text = f"За всё время:\n• Взято: {all_stats['total']}\n• Отстояло: {all_stats['completed']}\n• Слетело: {all_stats['failed']}\n• Заработано: {earnings['earnings']}$"
     
-    await message.answer(
-        f"📊 Моя статистика\n\n{today_text}\n\n{all_text}"
-    )
+    await message.answer(f"📊 Моя статистика\n\n{today_text}\n\n{all_text}")
 
 # --- Запуск бота ---
 
 async def main():
-    """Главная функция"""
-    # Инициализация базы данных
     init_db()
-    
-    # Запуск бота
     logger.info("Starting bot...")
     await dp.start_polling(bot)
 
