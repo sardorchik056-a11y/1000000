@@ -1,2241 +1,2004 @@
-# bot.py - С ПРИОРИТЕТНОЙ ОЧЕРЕДЬЮ
-
-import logging
 import asyncio
+import logging
+import sqlite3
 import re
-import random
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
-import aiohttp
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from typing import Optional, Dict, List, Tuple
+from contextlib import contextmanager
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, 
-    CallbackQuery, Message
+    ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, 
+    InlineKeyboardButton, Message, CallbackQuery, FSInputFile
 )
-from aiogram.client.default import DefaultBotProperties
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, BigInteger, func
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-
-# ==================== КОНФИГУРАЦИЯ ====================
-
-BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"
-CRYPTO_TOKEN = "YOUR_CRYPTO_TOKEN_HERE"  # <-- ВСТАВЬТЕ СВОЙ ТОКЕН ОТ @CryptoBot
-ADMIN_IDS = []  # Оставляем пустым для доступа всем
-SUPPORT_LINK = "https://t.me/support_bot"
-GROUP_ID = -1001234567890
-
-PRICE_NORMAL = 3.0
-PRICE_FAST = 1.5
-PRICE_SECRET = 3.0
-MIN_WITHDRAW = 10.0
-MIN_TIME_TO_EARN = 10
-
-CRYPTO_API_URL = "https://pay.crypt.bot/api"
-DATABASE_URL = "sqlite:///babrito.db"
-
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# ==================== БАЗА ДАННЫХ ====================
+# Конфигурация
+BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"  # Замените на ваш токен
 
-Base = declarative_base()
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(BigInteger, unique=True, nullable=False)
-    username = Column(String)
-    first_name = Column(String)
-    last_name = Column(String)
-    balance = Column(Float, default=0.0)
-    registered_at = Column(DateTime, default=datetime.now)
-    is_blocked = Column(Boolean, default=False)
-    is_admin = Column(Boolean, default=False)
-
-    total_taken = Column(Integer, default=0)
-    total_stood = Column(Integer, default=0)
-    total_failed = Column(Integer, default=0)
-    total_profit = Column(Float, default=0.0)
-
-    daily_taken = Column(Integer, default=0)
-    daily_stood = Column(Integer, default=0)
-    daily_failed = Column(Integer, default=0)
-    daily_profit = Column(Float, default=0.0)
-    daily_date = Column(String, default=datetime.now().strftime("%Y-%m-%d"))
-
-
-class QueueItem(Base):
-    __tablename__ = "queue"
-    id = Column(Integer, primary_key=True)
-    phone_number = Column(String, nullable=False)
-    user_id = Column(BigInteger, nullable=False)
-    queue_type = Column(String, nullable=False)  # fast, normal, secret
-    price = Column(Float, default=0.0)
-    status = Column(String, default="waiting")  # waiting, taken, stood, failed
-    created_at = Column(DateTime, default=datetime.now)
-    taken_at = Column(DateTime, nullable=True)
-    stood_at = Column(DateTime, nullable=True)
-    minutes_stood = Column(Integer, default=0)
-    is_paid = Column(Boolean, default=False)
-    group_message_id = Column(Integer, nullable=True)
-    secret_code = Column(String, nullable=True)
-
-
-class WithdrawRequest(Base):
-    __tablename__ = "withdraws"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, nullable=False)
-    amount = Column(Float, nullable=False)
-    status = Column(String, default="pending")
-    check_id = Column(String)
-    check_url = Column(String)
-    created_at = Column(DateTime, default=datetime.now)
-    completed_at = Column(DateTime, nullable=True)
-
-
-class BotStats(Base):
-    __tablename__ = "bot_stats"
-    id = Column(Integer, primary_key=True)
-    total_users = Column(Integer, default=0)
-    total_blocked = Column(Integer, default=0)
-    treasury_balance = Column(Float, default=0.0)
-    total_taken = Column(Integer, default=0)
-    total_stood = Column(Integer, default=0)
-    total_failed = Column(Integer, default=0)
-    total_profit = Column(Float, default=0.0)
-    total_balance = Column(Float, default=0.0)
-    last_updated = Column(DateTime, default=datetime.now)
-
-
-class WelcomePhoto(Base):
-    __tablename__ = "welcome_photos"
-    id = Column(Integer, primary_key=True)
-    file_id = Column(String, nullable=False)
-    uploaded_at = Column(DateTime, default=datetime.now)
-
-
-Base.metadata.create_all(engine)
-
-# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
-
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=storage)
-scheduler = AsyncIOScheduler()
 
-# ==================== FSM СОСТОЯНИЯ ====================
+# --- Состояния FSM ---
 
+class UserStates(StatesGroup):
+    # Сдать номер
+    entering_phone = State()
+    selecting_queue = State()
+    confirm_number = State()
+    
+    # Вывод средств
+    selecting_withdrawal = State()
+    
+    # Работяга - взять номер
+    worker_select_method = State()
+    worker_waiting_code = State()
+    worker_waiting_photo = State()
+    worker_waiting_qr = State()
+    worker_confirm_stand = State()
+    
+    # Админ
+    admin_add_worker = State()
+    admin_edit_price = State()
+    admin_set_photo = State()
+    admin_broadcast = State()
+    admin_treasury = State()
 
-class QueueStates(StatesGroup):
-    waiting_phone = State()
-    waiting_queue_type = State()
-    waiting_secret_phone = State()
-    waiting_secret_queue_type = State()
-    waiting_code = State()
+# --- Работа с базой данных ---
 
+DB_PATH = "babrito.db"
 
-class AdminStates(StatesGroup):
-    waiting_price = State()
-    waiting_mailing_text = State()
-    waiting_mailing_photo = State()
-    waiting_withdraw_address = State()
-    waiting_user_action = State()
-    waiting_balance_action = State()
+@contextmanager
+def get_db():
+    """Контекстный менеджер для работы с БД"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Database error: {e}")
+        raise
+    finally:
+        conn.close()
 
+def init_db():
+    """Инициализация базы данных"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Таблица users
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE NOT NULL,
+                username TEXT,
+                balance REAL DEFAULT 0,
+                is_admin BOOLEAN DEFAULT 0,
+                is_worker BOOLEAN DEFAULT 0,
+                is_banned BOOLEAN DEFAULT 0,
+                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица numbers
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS numbers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                phone_number TEXT NOT NULL,
+                queue_type TEXT NOT NULL,
+                price REAL NOT NULL,
+                status TEXT DEFAULT 'waiting',
+                worker_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                started_at DATETIME,
+                finished_at DATETIME,
+                is_paid BOOLEAN DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                FOREIGN KEY (worker_id) REFERENCES users (id)
+            )
+        ''')
+        
+        # Таблица withdrawals
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                check_id TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                completed_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+        
+        # Таблица settings
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                value TEXT
+            )
+        ''')
+        
+        # Настройки по умолчанию
+        default_settings = [
+            ('price', '3.0'),
+            ('vip_price', '1.5'),
+            ('treasury_balance', '0'),
+            ('min_withdrawal', '10'),
+            ('welcome_photo', '')
+        ]
+        
+        for key, value in default_settings:
+            cursor.execute(
+                'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
+                (key, value)
+            )
+        
+        # Создаем администратора по умолчанию (если нужно)
+        # Замените YOUR_TELEGRAM_ID на ваш ID
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (telegram_id, username, is_admin)
+            VALUES (?, ?, 1)
+        ''', (123456789, 'admin'))
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# --- Вспомогательные функции для работы с БД ---
 
-def generate_secret_code() -> str:
-    """Генерация секретного кода"""
-    return ''.join(random.choices('0123456789', k=6))
+def get_setting(key: str) -> str:
+    """Получить настройку"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        return row['value'] if row else None
 
+def set_setting(key: str, value: str):
+    """Установить настройку"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+            (key, value)
+        )
 
-def get_user(session: Session, telegram_id: int) -> User:
-    user = session.query(User).filter_by(telegram_id=telegram_id).first()
-    if not user:
-        user = User(telegram_id=telegram_id)
-        session.add(user)
-        session.commit()
+def get_user(telegram_id: int):
+    """Получить пользователя по telegram_id"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE telegram_id = ?', (telegram_id,))
+        return cursor.fetchone()
 
-        stats = session.query(BotStats).first()
-        if stats:
-            stats.total_users += 1
+def get_or_create_user(telegram_id: int, username: str = None):
+    """Получить или создать пользователя"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        user = cursor.execute(
+            'SELECT * FROM users WHERE telegram_id = ?', (telegram_id,)
+        ).fetchone()
+        
+        if not user:
+            cursor.execute(
+                'INSERT INTO users (telegram_id, username) VALUES (?, ?)',
+                (telegram_id, username)
+            )
+            conn.commit()
+            user = cursor.execute(
+                'SELECT * FROM users WHERE telegram_id = ?', (telegram_id,)
+            ).fetchone()
+        
+        return user
+
+def get_user_by_id(user_id: int):
+    """Получить пользователя по id"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        return cursor.fetchone()
+
+def get_worker_numbers(worker_id: int, status: str = None):
+    """Получить номера работяги"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                'SELECT * FROM numbers WHERE worker_id = ? AND status = ?',
+                (worker_id, status)
+            )
         else:
-            stats = BotStats(total_users=1)
-            session.add(stats)
-        session.commit()
-    return user
+            cursor.execute(
+                'SELECT * FROM numbers WHERE worker_id = ?',
+                (worker_id,)
+            )
+        return cursor.fetchall()
 
+def get_user_numbers(user_id: int, status: str = None):
+    """Получить номера пользователя"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                'SELECT * FROM numbers WHERE user_id = ? AND status = ?',
+                (user_id, status)
+            )
+        else:
+            cursor.execute(
+                'SELECT * FROM numbers WHERE user_id = ?',
+                (user_id,)
+            )
+        return cursor.fetchall()
 
-def format_phone(phone: str) -> Optional[str]:
-    phone = re.sub(r"[^\d]", "", phone)
-    if phone.startswith("8"):
-        phone = "7" + phone[1:]
-    if len(phone) == 10 and phone.startswith("9"):
-        phone = "7" + phone
-    if len(phone) == 11 and phone.startswith("7"):
-        return phone
-    return None
+def get_next_number(queue_type: str = None):
+    """Получить следующий номер из очереди"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if queue_type:
+            cursor.execute('''
+                SELECT * FROM numbers 
+                WHERE status = 'waiting' AND queue_type = ?
+                ORDER BY created_at ASC LIMIT 1
+            ''', (queue_type,))
+        else:
+            # Сначала VIP, потом обычные
+            cursor.execute('''
+                SELECT * FROM numbers 
+                WHERE status = 'waiting'
+                ORDER BY 
+                    CASE queue_type 
+                        WHEN 'vip' THEN 1 
+                        WHEN 'regular' THEN 2 
+                    END,
+                    created_at ASC 
+                LIMIT 1
+            ''')
+        return cursor.fetchone()
 
+def add_balance(telegram_id: int, amount: float):
+    """Добавить баланс пользователю"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET balance = balance + ? WHERE telegram_id = ?',
+            (amount, telegram_id)
+        )
 
-def get_queue_priority(queue_type: str) -> int:
-    """Возвращает приоритет очереди (чем меньше число, тем выше приоритет)"""
-    priorities = {
-        "fast": 1,      # VIP - самый высокий приоритет
-        "secret": 2,    # Секретная - второй
-        "normal": 3     # Обычная - самый низкий
-    }
-    return priorities.get(queue_type, 3)
+def subtract_balance(telegram_id: int, amount: float):
+    """Списать баланс"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET balance = balance - ? WHERE telegram_id = ? AND balance >= ?',
+            (amount, telegram_id, amount)
+        )
 
+# --- Клавиатуры ---
 
-def get_queue_position(session: Session, item_id: int) -> Optional[int]:
-    """Получение позиции в очереди с учетом приоритета"""
-    # Получаем все ожидающие номера
-    items = session.query(QueueItem).filter_by(status="waiting").all()
+def get_main_keyboard(telegram_id: int):
+    """Главное меню"""
+    user = get_user(telegram_id)
+    buttons = [
+        [KeyboardButton(text="📱 Сдать номер")],
+        [KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="📋 Моя очередь")],
+        [KeyboardButton(text="🆘 Тех поддержка")]
+    ]
     
-    # Сортируем по приоритету (fast -> secret -> normal) и по времени создания
-    sorted_items = sorted(items, key=lambda x: (get_queue_priority(x.queue_type), x.created_at))
+    if user and user['is_worker']:
+        buttons.append([KeyboardButton(text="🔧 Панель работяги")])
     
-    for i, item in enumerate(sorted_items, 1):
-        if item.id == item_id:
-            return i
-    return None
-
-
-def get_queue_list(session: Session) -> List[QueueItem]:
-    """Получение отсортированного списка очереди"""
-    items = session.query(QueueItem).filter_by(status="waiting").all()
-    # Сортируем по приоритету (fast -> secret -> normal) и по времени создания
-    return sorted(items, key=lambda x: (get_queue_priority(x.queue_type), x.created_at))
-
-
-def get_user_queue(session: Session, user_id: int) -> List[QueueItem]:
-    return session.query(QueueItem).filter_by(user_id=user_id).filter(
-        QueueItem.status.in_(["waiting", "taken"])
-    ).order_by(QueueItem.created_at).all()
-
-
-def get_queue_count(session: Session) -> int:
-    return session.query(QueueItem).filter_by(status="waiting").count()
-
-
-def get_queue_type_label(queue_type: str) -> str:
-    labels = {
-        "fast": "⚡ VIP (вне очереди)",
-        "normal": "💰 Обычная",
-        "secret": "🔐 Секретная"
-    }
-    return labels.get(queue_type, queue_type)
-
-
-def get_status_emoji(status: str) -> str:
-    emojis = {
-        "waiting": "⏳",
-        "taken": "📱",
-        "stood": "✅",
-        "failed": "❌"
-    }
-    return emojis.get(status, "❓")
-
-
-def back_keyboard(callback_data: str = "back_to_menu") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]
-        ]
+    if user and user['is_admin']:
+        buttons.append([KeyboardButton(text="⚙️ Админ панель")])
+    
+    return ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True
     )
 
-
-# ==================== CRYPTOBOT API ====================
-
-class CryptoBotAPI:
-    def __init__(self, token: str):
-        self.token = token
-        self.headers = {
-            "Content-Type": "application/json",
-            "Crypto-Pay-API-Token": token
-        }
-
-    async def _make_request(self, method: str, payload: dict) -> dict:
-        """Базовый метод для запросов к CryptoBot API"""
-        url = f"{CRYPTO_API_URL}/{method}"
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, headers=self.headers, json=payload) as resp:
-                    result = await resp.json()
-                    logger.info(f"CryptoBot API {method} response: {result}")
-                    return result
-            except Exception as e:
-                logger.error(f"CryptoBot API error: {e}")
-                return {"ok": False, "error": str(e)}
-
-    async def create_check(self, amount: float, currency: str = "USDT", description: str = None) -> dict:
-        """Создание чека для вывода"""
-        payload = {
-            "amount": str(amount),
-            "currency": currency,
-            "description": description or f"Вывод {amount} USDT"
-        }
-        return await self._make_request("createCheck", payload)
-
-    async def get_check_status(self, check_id: str) -> dict:
-        """Получение статуса чека"""
-        return await self._make_request("getCheckStatus", {"check_id": check_id})
-
-    async def create_invoice(self, amount: float, currency: str = "USDT", description: str = None) -> dict:
-        """Создание счета для пополнения"""
-        payload = {
-            "amount": str(amount),
-            "currency": currency,
-            "description": description or f"Пополнение казны {amount} USDT"
-        }
-        return await self._make_request("createInvoice", payload)
-
-    async def get_balance(self) -> dict:
-        """Получение баланса CryptoBot"""
-        return await self._make_request("getBalance", {})
-
-    async def check_crypto_balance(self, currency: str = "USDT") -> float:
-        """Проверка баланса конкретной валюты"""
-        try:
-            result = await self.get_balance()
-            if result.get("ok"):
-                balances = result.get("result", [])
-                for bal in balances:
-                    if bal.get("currency_code") == currency:
-                        return float(bal.get("available", 0))
-            return 0
-        except Exception as e:
-            logger.error(f"Error checking balance: {e}")
-            return 0
-
-
-# Инициализация CryptoBot API
-crypto = CryptoBotAPI(CRYPTO_TOKEN)
-
-# ==================== КЛАВИАТУРЫ ====================
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📱 Сдать номер", callback_data="submit_number"),
-                InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
-            ],
-            [
-                InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-                InlineKeyboardButton(text="🆘 Тех поддержка", callback_data="support")
-            ]
-        ]
+def get_admin_keyboard():
+    """Админ панель"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="👥 Пользователи")],
+            [KeyboardButton(text="💰 Балансы")],
+            [KeyboardButton(text="💰 Пополнить казну")],
+            [KeyboardButton(text="📨 Рассылка")],
+            [KeyboardButton(text="📊 История выводов")],
+            [KeyboardButton(text="💥 Расчет оплат")],
+            [KeyboardButton(text="📝 Редактировать прайс")],
+            [KeyboardButton(text="🖼 Установить фото")],
+            [KeyboardButton(text="➕ Добавить работягу")],
+            [KeyboardButton(text="📋 Список работяг")],
+            [KeyboardButton(text="🔙 Закрыть")]
+        ],
+        resize_keyboard=True
     )
 
-
-def group_panel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📱 Взять номер", callback_data="group_take_number"),
-                InlineKeyboardButton(text="📊 Моя статистика", callback_data="group_my_stats")
-            ]
-        ]
+def get_worker_keyboard():
+    """Панель работяги"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Взять номер")],
+            [KeyboardButton(text="📊 Моя статистика")],
+            [KeyboardButton(text="❌ Закрыть")]
+        ],
+        resize_keyboard=True
     )
 
-
-def queue_type_keyboard(phone: str) -> InlineKeyboardMarkup:
-    """Клавиатура выбора типа очереди"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⚡ VIP (1.5$) - Вне очереди", callback_data=f"queue_fast_{phone}"),
-                InlineKeyboardButton(text="💰 Обычная (3$)", callback_data=f"queue_normal_{phone}")
-            ],
-            [
-                InlineKeyboardButton(text="🔐 Секретная (3$)", callback_data=f"queue_secret_{phone}")
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
-            ]
-        ]
+def get_withdrawal_keyboard():
+    """Клавиатура для вывода средств"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="10$", callback_data="withdraw_10"),
+        InlineKeyboardButton(text="25$", callback_data="withdraw_25"),
+        InlineKeyboardButton(text="50$", callback_data="withdraw_50")
     )
-
-
-def connect_method_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔄 Перенос", callback_data="connect_transfer"),
-                InlineKeyboardButton(text="🔗 Связ", callback_data="connect_link")
-            ],
-            [
-                InlineKeyboardButton(text="📱 Кюар", callback_data="connect_qr"),
-                InlineKeyboardButton(text="🔙 Назад", callback_data="group_back")
-            ]
-        ]
+    builder.row(
+        InlineKeyboardButton(text="100$", callback_data="withdraw_100"),
+        InlineKeyboardButton(text="Весь баланс", callback_data="withdraw_all")
     )
-
-
-def secret_panel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📱 Сдать номер (3$)", callback_data="secret_submit"),
-                InlineKeyboardButton(text="💰 Вывести казну", callback_data="secret_withdraw_treasury")
-            ],
-            [
-                InlineKeyboardButton(text="📊 Статистика", callback_data="secret_stats"),
-                InlineKeyboardButton(text="👥 Пользователи", callback_data="secret_users")
-            ],
-            [
-                InlineKeyboardButton(text="💰 Балансы", callback_data="secret_balances"),
-                InlineKeyboardButton(text="💰 Пополнить казну", callback_data="secret_topup")
-            ],
-            [
-                InlineKeyboardButton(text="📨 Рассылка", callback_data="secret_mailing"),
-                InlineKeyboardButton(text="📊 История выводов", callback_data="secret_withdraw_history")
-            ],
-            [
-                InlineKeyboardButton(text="💥 Расчет оплат", callback_data="secret_calculate_payments"),
-                InlineKeyboardButton(text="📝 Редактировать прайс", callback_data="secret_edit_price")
-            ],
-            [
-                InlineKeyboardButton(text="💰 Баланс CryptoBot", callback_data="secret_crypto_balance"),
-                InlineKeyboardButton(text="🔙 Закрыть", callback_data="back_to_menu")
-            ]
-        ]
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="withdraw_back")
     )
+    return builder.as_markup()
 
+def get_queue_keyboard():
+    """Выбор очереди"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⚡ VIP (вне очереди) 1.5$", callback_data="queue_vip"),
+        InlineKeyboardButton(text="💰 Обычная 3$", callback_data="queue_regular")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="queue_back")
+    )
+    return builder.as_markup()
 
-# ==================== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЯ ====================
+def get_confirm_keyboard(number: str, queue_type: str, price: float):
+    """Подтверждение добавления номера"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{number}_{queue_type}_{price}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="confirm_cancel")
+    )
+    return builder.as_markup()
+
+def get_worker_method_keyboard():
+    """Способы конекта для работяги"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔄 Перенос (Код)", callback_data="method_transfer"),
+        InlineKeyboardButton(text="🔗 Связ", callback_data="method_link")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📱 Кюар", callback_data="method_qr"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="method_cancel")
+    )
+    return builder.as_markup()
+
+def get_worker_stand_keyboard():
+    """Кнопки для работяги после получения кода"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Встал", callback_data="stand_yes"),
+        InlineKeyboardButton(text="❌ Ошибка", callback_data="stand_no")
+    )
+    return builder.as_markup()
+
+def get_worker_fly_keyboard(number_id: int):
+    """Кнопка слета"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💥 Слет", callback_data=f"fly_{number_id}")
+    )
+    return builder.as_markup()
+
+def get_user_action_keyboard(number_id: int):
+    """Кнопки для пользователя"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Сделал", callback_data=f"user_done_{number_id}")
+    )
+    return builder.as_markup()
+
+# --- Обработчики команд ---
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    session = SessionLocal()
-    try:
-        user = get_user(session, message.from_user.id)
-        photo = session.query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
-
-        text = f"""💬 Добро пожаловать в Babrito WA
-
-🏷 Username: @{message.from_user.username or 'Не указан'}
-💰 Цена за аккаунт: {PRICE_NORMAL}$
-💰 Баланс: {user.balance}$
-
-💬 Выберите нужный раздел:"""
-
-        if photo:
-            await bot.send_photo(message.chat.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
-        else:
-            await message.reply(text, reply_markup=main_menu_keyboard())
-    finally:
-        session.close()
-
-
-@dp.callback_query(lambda c: c.data == "back_to_menu")
-async def back_to_menu(callback: CallbackQuery):
-    await callback.message.delete()
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-        photo = session.query(WelcomePhoto).order_by(WelcomePhoto.uploaded_at.desc()).first()
-
-        text = f"""💬 Добро пожаловать в Babrito WA
-
-🏷 Username: @{callback.from_user.username or 'Не указан'}
-💰 Цена за аккаунт: {PRICE_NORMAL}$
-💰 Баланс: {user.balance}$
-
-💬 Выберите нужный раздел:"""
-
-        if photo:
-            await bot.send_photo(callback.from_user.id, photo.file_id, caption=text, reply_markup=main_menu_keyboard())
-        else:
-            await callback.message.answer(text, reply_markup=main_menu_keyboard())
-    finally:
-        session.close()
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "support")
-async def support_callback(callback: CallbackQuery):
-    await callback.message.edit_text(
-        f"🆘 Для связи с техподдержкой напишите {SUPPORT_LINK}",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "profile")
-async def profile_callback(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        text = f"""👤 Профиль
-
-🏷 Username: @{callback.from_user.username or 'Не указан'}
-💰 Цена за аккаунт: {PRICE_NORMAL}$
-💰 Баланс: {user.balance}$
-💬 Дата регистрации: {user.registered_at.strftime('%d.%m.%Y')}"""
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="📊 Статистика", callback_data="stats_menu"),
-                    InlineKeyboardButton(text="💸 Вывод", callback_data="withdraw_menu")
-                ],
-                [
-                    InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-                    InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
-                ]
-            ]
-        )
-    finally:
-        session.close()
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "my_queue")
-async def my_queue_callback(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        queue_items = get_user_queue(session, callback.from_user.id)
-        total = get_queue_count(session)
-        
-        # Получаем всю очередь для отображения позиций
-        all_queue = get_queue_list(session)
-
-        if not queue_items:
-            await callback.message.edit_text(
-                "📋 Ваша очередь пуста",
-                reply_markup=back_keyboard()
-            )
-            return
-
-        text = f"📋 Ваша очередь\n\n📊 Всего номеров в очереди: {total}\n— — — — — — — — — —\n\n"
-
-        for i, item in enumerate(queue_items[:10], 1):
-            status_emoji = get_status_emoji(item.status)
-            queue_type = get_queue_type_label(item.queue_type)
-
-            if item.status == "waiting":
-                position = get_queue_position(session, item.id)
-                text += f"📍 Место #{position} (приоритет: {get_queue_priority(item.queue_type)})\n"
-            else:
-                text += f"📍 Статус: {status_emoji} Взят\n"
-
-            text += f"📱 {item.phone_number}\n"
-            text += f"📌 {queue_type}\n"
-            text += f"💰 {item.price}$\n— — — — — — — — — —\n\n"
-
-        if len(queue_items) > 10:
-            text += f"и еще {len(queue_items) - 10} номеров..."
-    finally:
-        session.close()
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="my_queue"),
-                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
-            ]
-        ]
-    )
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    except Exception as e:
-        if "message is not modified" in str(e):
-            await callback.answer("🔄 Данные актуальны")
-        else:
-            raise
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "stats_menu")
-async def stats_menu(callback: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📅 Сегодня", callback_data="stats_today"),
-                InlineKeyboardButton(text="🕐 За всё время", callback_data="stats_alltime")
-            ],
-            [
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")
-            ]
-        ]
-    )
-
-    await callback.message.edit_text(
-        f"💬 Статистика\n\n🏷 Ваш ID: {callback.from_user.id}\n\nВыберите период ⬇️",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("stats_"))
-async def show_stats(callback: CallbackQuery):
-    period = callback.data.split("_")[1]
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if user.daily_date != today:
-            user.daily_taken = 0
-            user.daily_stood = 0
-            user.daily_failed = 0
-            user.daily_profit = 0
-            user.daily_date = today
-            session.commit()
-
-        if period == "today":
-            text = f"""💬 Период: Сегодня
-
-— — — — — — — — — —
-
-📤 Взято номеров: {user.daily_taken}
-📤 Отстояло: {user.daily_stood}
-📉 Слёт: {user.daily_failed}
-💰 Прибыль: {user.daily_profit}$"""
-        else:
-            text = f"""💬 Период: За всё время
-
-— — — — — — — — — —
-
-📤 Взято номеров: {user.total_taken}
-📤 Отстояло: {user.total_stood}
-📉 Слёт: {user.total_failed}
-💰 Прибыль: {user.total_profit}$"""
-    finally:
-        session.close()
-    
-    await callback.message.edit_text(text, reply_markup=back_keyboard("stats_menu"))
-    await callback.answer()
-
-
-# ==================== СДАТЬ НОМЕР ====================
-
-@dp.callback_query(lambda c: c.data == "submit_number")
-async def submit_number_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(QueueStates.waiting_phone)
-    await callback.message.edit_text(
-        """💬 Введите номер, который хотите сдать:
-
-Правильные форматы:
-• 10 цифр: 7XXXXXXXXX или 8XXXXXXXXX
-• 9 цифр: 9XXXXXXXX
-
-Примеры:
-+79123456789
-79123456789
-9123456789
-89123456789
-
-⚠️ Номер можно добавить только в одну очередь!
-После того как номер заберут, его можно будет добавить снова.""",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.message(QueueStates.waiting_phone)
-async def process_phone(message: Message, state: FSMContext):
-    phone = format_phone(message.text)
-    if not phone:
-        await message.reply("❌ Неверный формат номера. Попробуйте снова.\nИли нажмите /cancel для отмены.")
-        return
-
-    # Проверяем, есть ли этот номер уже в очереди
-    session = SessionLocal()
-    try:
-        existing = session.query(QueueItem).filter_by(
-            phone_number=phone,
-            status="waiting"
-        ).first()
-        
-        if existing:
-            await message.reply(
-                f"❌ Номер {phone} уже находится в очереди!\n"
-                f"📌 Тип: {get_queue_type_label(existing.queue_type)}\n"
-                f"📊 Позиция: {get_queue_position(session, existing.id)}"
-            )
-            session.close()
-            return
-    finally:
-        session.close()
-
-    await state.update_data(phone=phone)
-    await state.set_state(QueueStates.waiting_queue_type)
-
-    await message.reply(
-        "💬 Выберите тип очереди:\n\n"
-        "⚡ VIP - 1.5$ за 10+ минут (Вне очереди!)\n"
-        "💰 Обычная - 3$ за 10+ минут\n"
-        "🔐 Секретная - 3$ за 10+ минут\n\n"
-        "⚠️ Номер можно добавить только в одну очередь!",
-        reply_markup=queue_type_keyboard(phone)
-    )
-
-
-@dp.callback_query(lambda c: c.data.startswith("queue_"), StateFilter(QueueStates.waiting_queue_type))
-async def choose_queue_type(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    queue_type = parts[1]
-    phone = parts[2]
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        if user.is_blocked:
-            await callback.message.edit_text("❌ Вы заблокированы. Обратитесь к администратору.")
-            await state.clear()
-            return
-
-        # Проверяем, не добавлен ли номер уже в очередь
-        existing = session.query(QueueItem).filter_by(
-            phone_number=phone,
-            status="waiting"
-        ).first()
-        
-        if existing:
-            await callback.message.edit_text(
-                f"❌ Номер {phone} уже находится в очереди!\n"
-                f"📌 Тип: {get_queue_type_label(existing.queue_type)}"
-            )
-            await state.clear()
-            return
-
-        # Устанавливаем цену в зависимости от типа
-        if queue_type == "fast":
-            price = PRICE_FAST
-        elif queue_type == "secret":
-            price = PRICE_SECRET
-        else:
-            price = PRICE_NORMAL
-
-        queue_item = QueueItem(
-            phone_number=phone,
-            user_id=callback.from_user.id,
-            queue_type=queue_type,
-            price=price
-        )
-        session.add(queue_item)
-        session.commit()
-
-        position = get_queue_position(session, queue_item.id)
-        total = get_queue_count(session)
-
-        # Получаем информацию о приоритете
-        priority_text = {
-            "fast": "⚡ VIP (высший приоритет - ВНЕ ОЧЕРЕДИ!)",
-            "secret": "🔐 Секретная (высокий приоритет)",
-            "normal": "💰 Обычная"
-        }.get(queue_type, "")
-
-        await callback.message.edit_text(
-            f"""✅ Номер успешно добавлен в очередь!
-
-🏷 Номер: {phone}
-💰 Цена: {price}$ за 10+ минут
-📌 Тип: {get_queue_type_label(queue_type)}
-{priority_text}
-📊 Ваша позиция: {position}/{total}
-
-⏳ Ожидайте пока админ возьмет ваш номер
-
-⚠️ Номер можно добавить только в одну очередь!""",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="📋 Моя очередь", callback_data="my_queue"),
-                        InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
-                    ]
-                ]
-            )
-        )
-    finally:
-        session.close()
-    
+async def cmd_start(message: Message, state: FSMContext):
+    """Обработчик команды /start"""
     await state.clear()
-    await callback.answer()
-
-
-# ==================== ВЫВОД СРЕДСТВ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) ====================
-
-@dp.callback_query(lambda c: c.data == "withdraw_menu")
-async def withdraw_menu(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        buttons = []
-        amounts = [10, 25, 50, 100]
-        row = []
-        for amount in amounts:
-            if user.balance >= amount:
-                row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"withdraw_{amount}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
-        if row:
-            buttons.append(row)
-
-        if user.balance >= MIN_WITHDRAW:
-            buttons.append([InlineKeyboardButton(text=f"💰 Весь баланс ({int(user.balance)}$)", callback_data=f"withdraw_{int(user.balance)}")])
-
-        buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="profile")])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-        await callback.message.edit_text(
-            f"""💸 ВЫВОД СРЕДСТВ
-
-💰 Ваш баланс: {user.balance}$
-💳 Минимальная сумма: {MIN_WITHDRAW}$
-
-Выберите сумму для вывода:""",
-            reply_markup=keyboard
-        )
-    finally:
-        session.close()
     
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("withdraw_") and c.data != "withdraw_menu")
-async def process_withdraw(callback: CallbackQuery):
-    amount = float(callback.data.split("_")[1])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        if user.balance < amount:
-            await callback.message.edit_text("❌ Недостаточно средств на балансе.")
-            return
-
-        if amount < MIN_WITHDRAW:
-            await callback.message.edit_text(f"❌ Минимальная сумма вывода {MIN_WITHDRAW}$")
-            return
-
-        # Проверяем баланс CryptoBot перед созданием чека
-        crypto_balance = await crypto.check_crypto_balance("USDT")
-        if crypto_balance < amount:
-            await callback.message.edit_text(
-                f"""❌ Недостаточно средств на CryptoBot для создания чека!
-
-💰 Доступно на CryptoBot: {crypto_balance} USDT
-💰 Запрошено: {amount} USDT
-
-Пожалуйста, пополните баланс CryptoBot или уменьшите сумму."""
-            )
-            return
-
+    user = get_or_create_user(
+        message.from_user.id,
+        message.from_user.username
+    )
+    
+    price = get_setting('price')
+    welcome_photo = get_setting('welcome_photo')
+    
+    welcome_text = (
+        f"👋 Добро пожаловать в Babrito WA!\n\n"
+        f"👤 Username: @{message.from_user.username or 'Не указан'}\n"
+        f"💰 Текущая цена за аккаунт: {price}$\n"
+        f"💵 Баланс: {user['balance']}$\n"
+        f"🎭 Роль: {'Администратор' if user['is_admin'] else 'Работяга' if user['is_worker'] else 'Пользователь'}\n\n"
+        "Выберите действие:"
+    )
+    
+    # Отправляем фото если оно установлено
+    if welcome_photo:
         try:
-            # Создаем чек через CryptoBot API
-            check_result = await crypto.create_check(amount, "USDT", f"Вывод для @{user.username or user.telegram_id}")
-            
-            if check_result.get("ok"):
-                check_data = check_result["result"]
-                check_id = check_data["check_id"]
-                check_url = check_data["url"]
-
-                # Сохраняем заявку в БД
-                withdraw = WithdrawRequest(
-                    user_id=user.telegram_id,
-                    amount=amount,
-                    check_id=check_id,
-                    check_url=check_url
-                )
-                session.add(withdraw)
-                session.commit()
-
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                            InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_withdraw_{withdraw.id}")
-                        ],
-                        [
-                            InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
-                        ]
-                    ]
-                )
-
-                await callback.message.edit_text(
-                    f"""🧾 ЧЕК НА ВЫВОД
-
-💰 Сумма: {amount}$
-🆔 ID чека: {check_id}
-
-🔗 ССЫЛКА ДЛЯ АКТИВАЦИИ:
-{check_url}
-
-📱 Перейдите по ссылке и активируйте чек
-После активации вы получите USDT на свой кошелек
-
-⚠️ Чек активен 1 час!""",
-                    reply_markup=keyboard
-                )
-            else:
-                error_msg = check_result.get("error", "Неизвестная ошибка")
-                await callback.message.edit_text(f"❌ Ошибка при создании чека: {error_msg}")
-                
+            photo = FSInputFile(welcome_photo)
+            await message.answer_photo(
+                photo=photo,
+                caption=welcome_text,
+                reply_markup=get_main_keyboard(message.from_user.id)
+            )
+            return
         except Exception as e:
-            logger.error(f"Error creating check: {e}")
-            await callback.message.edit_text("❌ Ошибка при создании чека. Попробуйте позже.")
-            
-    finally:
-        session.close()
+            logger.error(f"Error sending welcome photo: {e}")
     
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("check_withdraw_"))
-async def check_withdraw_status(callback: CallbackQuery):
-    withdraw_id = int(callback.data.split("_")[2])
-
-    session = SessionLocal()
-    try:
-        withdraw = session.query(WithdrawRequest).filter_by(id=withdraw_id).first()
-
-        if not withdraw:
-            await callback.message.edit_text("❌ Заявка не найдена.")
-            return
-
-        try:
-            status_result = await crypto.get_check_status(withdraw.check_id)
-            if status_result.get("ok"):
-                status = status_result["result"]["status"]
-                if status == "paid" or status == "active":
-                    # Чек активирован
-                    withdraw.status = "completed"
-                    withdraw.completed_at = datetime.now()
-
-                    # Списываем сумму с баланса пользователя
-                    user = get_user(session, withdraw.user_id)
-                    user.balance -= withdraw.amount
-
-                    # Обновляем статистику
-                    stats = session.query(BotStats).first()
-                    if stats:
-                        stats.total_profit += withdraw.amount
-
-                    session.commit()
-
-                    await callback.message.edit_text(
-                        f"""✅ ВЫВОД ПОДТВЕРЖДЕН!
-
-💰 Чек активирован!
-🆔 ID: {withdraw.check_id}
-💰 Сумма: {withdraw.amount}$
-
-📌 Средства поступят на ваш кошелек в ближайшее время""",
-                        reply_markup=back_keyboard()
-                    )
-                elif status == "expired":
-                    await callback.message.edit_text(
-                        "❌ Срок действия чека истек. Создайте новый запрос на вывод."
-                    )
-                else:
-                    await callback.message.edit_text(
-                        f"⏳ Чек еще не активирован. Статус: {status}",
-                        reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_withdraw_{withdraw.id}")],
-                                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-                            ]
-                        )
-                    )
-        except Exception as e:
-            logger.error(f"Error checking withdraw status: {e}")
-            await callback.message.edit_text("❌ Ошибка при проверке статуса. Попробуйте позже.")
-    finally:
-        session.close()
-    
-    await callback.answer()
-
-
-# ==================== ГРУППОВАЯ ПАНЕЛЬ ====================
-
-group_active = False
-
-
-@dp.message(Command("balarkryt"))
-async def activate_group_panel(message: Message):
-    global group_active
-    group_active = True
-
-    await message.reply(
-        "✅ Групповая панель активирована!\n\n"
-        "РАБОЧАЯ ПАНЕЛЬ\n"
-        "Теперь все участники группы могут брать номера!\n"
-        "Выберите действие:",
-        reply_markup=group_panel_keyboard()
+    await message.answer(
+        welcome_text,
+        reply_markup=get_main_keyboard(message.from_user.id)
     )
 
-
-@dp.message(Command("XYI"))
-async def open_group_panel(message: Message):
-    if not group_active:
-        await message.reply("❌ Панель не активирована. Напишите /balarkryt для активации.")
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    """Админ панель"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа к админ-панели.")
         return
-
-    await message.reply(
-        "РАБОЧАЯ ПАНЕЛЬ\nВыберите действие:",
-        reply_markup=group_panel_keyboard()
-    )
-
-
-@dp.callback_query(lambda c: c.data == "group_back")
-async def group_back(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "РАБОЧАЯ ПАНЕЛЬ\nВыберите действие:",
-        reply_markup=group_panel_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "group_take_number")
-async def group_take_number(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "📱 Выберите способ конекта:",
-        reply_markup=connect_method_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("connect_"))
-async def connect_method(callback: CallbackQuery, state: FSMContext):
-    method = callback.data.split("_")[1]
-
-    if method == "transfer":
-        code = generate_secret_code()
-        await state.update_data(secret_code=code, method="transfer")
-        await state.set_state(QueueStates.waiting_code)
-
-        await callback.message.edit_text(
-            f"""🔄 Перенос
-
-📱 Введите код подтверждения:
-🔑 Код: {code}
-
-Инструкция:
-1. Администратор берет номер
-2. Вы вводите код подтверждения
-3. Администратор подтверждает в группе
-
-[❌ Отмена]""",
-            reply_markup=back_keyboard("group_back")
-        )
-    else:
-        await callback.message.edit_text(
-            f"""📱 {method.upper()}
-
-📤 Администратор отправит фото с кодом в группу.
-Введите код подтверждения:""",
-            reply_markup=back_keyboard("group_back")
-        )
-        await state.set_state(QueueStates.waiting_code)
-
-    await callback.answer()
-
-
-@dp.message(QueueStates.waiting_code)
-async def process_code(message: Message, state: FSMContext):
-    code = message.text.strip()
-
-    session = SessionLocal()
-    try:
-        queue_item = session.query(QueueItem).filter_by(secret_code=code, status="waiting").first()
-
-        if not queue_item:
-            await message.reply("❌ Неверный код. Попробуйте снова или нажмите /cancel")
-            return
-
-        queue_item.status = "taken"
-        queue_item.taken_at = datetime.now()
-
-        user = get_user(session, queue_item.user_id)
-        user.total_taken += 1
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if user.daily_date == today:
-            user.daily_taken += 1
-        else:
-            user.daily_taken = 1
-            user.daily_date = today
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Встал", callback_data=f"stood_{queue_item.id}"),
-                    InlineKeyboardButton(text="🔄 Повтор", callback_data=f"retry_{queue_item.id}"),
-                    InlineKeyboardButton(text="❌ Ошибка", callback_data=f"failed_{queue_item.id}")
-                ]
-            ]
-        )
-
-        await bot.send_message(
-            GROUP_ID,
-            f"""📱 Номер взят!
-
-👤 @{message.from_user.username or 'Неизвестно'}
-📱 {queue_item.phone_number}
-📌 {get_queue_type_label(queue_item.queue_type)}
-💰 {queue_item.price}$
-
-⏳ Ожидайте подтверждения...""",
-            reply_markup=keyboard
-        )
-
-        session.commit()
-    finally:
-        session.close()
-
-    await message.reply("✅ Код подтвержден! Ожидайте подтверждения в группе.")
-    await state.clear()
-
-
-# ==================== ОБРАБОТКА В ГРУППЕ ====================
-
-@dp.callback_query(lambda c: c.data.startswith("stood_"))
-async def number_stood(callback: CallbackQuery):
-    queue_id = int(callback.data.split("_")[1])
-
-    session = SessionLocal()
-    try:
-        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
-
-        if not queue_item:
-            await callback.message.edit_text("❌ Номер не найден")
-            return
-
-        queue_item.status = "stood"
-        queue_item.stood_at = datetime.now()
-
-        if queue_item.taken_at:
-            minutes = (datetime.now() - queue_item.taken_at).total_seconds() / 60
-            queue_item.minutes_stood = int(minutes)
-
-        user = get_user(session, queue_item.user_id)
-
-        if queue_item.minutes_stood >= MIN_TIME_TO_EARN:
-            user.balance += queue_item.price
-            user.total_stood += 1
-            user.total_profit += queue_item.price
-
-            today = datetime.now().strftime("%Y-%m-%d")
-            if user.daily_date == today:
-                user.daily_stood += 1
-                user.daily_profit += queue_item.price
-            else:
-                user.daily_stood = 1
-                user.daily_profit = queue_item.price
-                user.daily_date = today
-
-            queue_item.is_paid = True
-            session.commit()
-
-            await callback.message.edit_text(
-                f"""✅ Номер отстоял {queue_item.minutes_stood} мин
-💰 Начислено: {queue_item.price}$"""
-            )
-        else:
-            user.total_failed += 1
-            today = datetime.now().strftime("%Y-%m-%d")
-            if user.daily_date == today:
-                user.daily_failed += 1
-            else:
-                user.daily_failed = 1
-                user.daily_date = today
-
-            session.commit()
-
-            await callback.message.edit_text(
-                f"""❌ Номер слетел за {queue_item.minutes_stood} мин
-📉 Деньги не начислены (нужно минимум {MIN_TIME_TO_EARN} мин)"""
-            )
-
-        stats = session.query(BotStats).first()
-        if stats:
-            if queue_item.minutes_stood >= MIN_TIME_TO_EARN:
-                stats.total_stood += 1
-            else:
-                stats.total_failed += 1
-
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("failed_"))
-async def number_failed(callback: CallbackQuery):
-    queue_id = int(callback.data.split("_")[1])
-
-    session = SessionLocal()
-    try:
-        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
-
-        if not queue_item:
-            await callback.message.edit_text("❌ Номер не найден")
-            return
-
-        queue_item.status = "failed"
-
-        user = get_user(session, queue_item.user_id)
-        user.total_failed += 1
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if user.daily_date == today:
-            user.daily_failed += 1
-        else:
-            user.daily_failed = 1
-            user.daily_date = today
-
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text("❌ Номер не встал")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("retry_"))
-async def number_retry(callback: CallbackQuery):
-    queue_id = int(callback.data.split("_")[1])
-
-    session = SessionLocal()
-    try:
-        queue_item = session.query(QueueItem).filter_by(id=queue_id).first()
-
-        if queue_item:
-            queue_item.status = "waiting"
-            queue_item.taken_at = None
-            session.commit()
-
-            await callback.message.edit_text("🔄 Повтор запроса")
-    finally:
-        session.close()
-    
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "group_my_stats")
-async def group_my_stats(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        user = get_user(session, callback.from_user.id)
-
-        text = f"""📊 Моя статистика
-
-👤 @{callback.from_user.username or 'Неизвестно'}
-💰 Баланс: {user.balance}$
-📤 Взято: {user.total_taken}
-✅ Отстояло: {user.total_stood}
-❌ Слетело: {user.total_failed}
-💰 Прибыль: {user.total_profit}$"""
-    finally:
-        session.close()
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=back_keyboard("group_back")
-    )
-    await callback.answer()
-
-
-# ==================== СЕКРЕТНАЯ ПАНЕЛЬ ====================
-
-@dp.message(Command("Xyli1488"))
-async def secret_panel(message: Message):
-    await message.reply(
-        "🔐 СЕКРЕТНАЯ ПАНЕЛЬ (ДОСТУПНА ВСЕМ)\n\n"
-        "📱 Сдать номер вне очереди по цене 3$\n"
-        "💰 Вывести казну\n"
-        "📊 Статистика\n"
-        "👥 Пользователи\n"
-        "💰 Балансы\n"
-        "💰 Пополнить казну\n"
-        "📨 Рассылка\n"
-        "📊 История выводов\n"
-        "💥 Расчет оплат\n"
-        "📝 Редактировать прайс\n"
-        "💰 Баланс CryptoBot\n\n"
-        "Выберите действие:",
-        reply_markup=secret_panel_keyboard()
-    )
-
-
-# ---------- СЕКРЕТНАЯ: Сдать номер ----------
-@dp.callback_query(lambda c: c.data == "secret_submit")
-async def secret_submit(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(QueueStates.waiting_secret_phone)
-    await callback.message.edit_text(
-        "💬 Введите номер для секретной сдачи (3$ за 10+ минут):\n\n"
-        "⚠️ Номер можно добавить только в одну очередь!",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.message(QueueStates.waiting_secret_phone)
-async def secret_process_phone(message: Message, state: FSMContext):
-    phone = format_phone(message.text)
-    if not phone:
-        await message.reply("❌ Неверный формат номера. Попробуйте снова.")
-        return
-
-    session = SessionLocal()
-    try:
-        # Проверяем, не добавлен ли номер уже в очередь
-        existing = session.query(QueueItem).filter_by(
-            phone_number=phone,
-            status="waiting"
-        ).first()
-        
-        if existing:
-            await message.reply(
-                f"❌ Номер {phone} уже находится в очереди!\n"
-                f"📌 Тип: {get_queue_type_label(existing.queue_type)}\n"
-                f"📊 Позиция: {get_queue_position(session, existing.id)}"
-            )
-            await state.clear()
-            return
-
-        user = get_user(session, message.from_user.id)
-
-        if user.is_blocked:
-            await message.reply("❌ Вы заблокированы.")
-            await state.clear()
-            return
-
-        queue_item = QueueItem(
-            phone_number=phone,
-            user_id=message.from_user.id,
-            queue_type="secret",
-            price=PRICE_SECRET
-        )
-        session.add(queue_item)
-        session.commit()
-
-        position = get_queue_position(session, queue_item.id)
-        total = get_queue_count(session)
-
-        await message.reply(
-            f"""✅ Номер успешно добавлен в секретную очередь!
-
-🏷 Номер: {phone}
-💰 Цена: {PRICE_SECRET}$ за 10+ минут
-📌 Очередь: Секретная (высокий приоритет)
-💳 Оплата: сразу
-📊 Ваша позиция: {position}/{total}
-
-⏳ Ожидайте пока админ возьмет ваш номер
-
-⚠️ Номер можно добавить только в одну очередь!"""
-        )
-    finally:
-        session.close()
     
     await state.clear()
-
-
-# ---------- СЕКРЕТНАЯ: Вывод казны ----------
-@dp.callback_query(lambda c: c.data == "secret_withdraw_treasury")
-async def secret_withdraw_treasury(callback: CallbackQuery, state: FSMContext):
-    session = SessionLocal()
-    try:
-        stats = session.query(BotStats).first()
-        balance = stats.treasury_balance if stats else 0
-        
-        if balance <= 0:
-            await callback.message.edit_text(
-                "❌ Баланс казны пуст!",
-                reply_markup=back_keyboard()
-            )
-            await callback.answer()
-            return
-        
-        # Проверяем баланс CryptoBot
-        crypto_balance = await crypto.check_crypto_balance("USDT")
-        if crypto_balance < balance:
-            await callback.message.edit_text(
-                f"""❌ Недостаточно средств на CryptoBot для вывода казны!
-
-💰 В казне: {balance} USDT
-💰 Доступно на CryptoBot: {crypto_balance} USDT
-
-Пожалуйста, пополните баланс CryptoBot.""",
-                reply_markup=back_keyboard()
-            )
-            await callback.answer()
-            return
-        
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Подтвердить вывод", callback_data=f"confirm_treasury_{balance}"),
-                    InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_menu")
-                ]
-            ]
-        )
-        
-        await callback.message.edit_text(
-            f"""💰 ВЫВОД КАЗНЫ
-
-💰 Сумма к выводу: {balance}$
-💰 Доступно на CryptoBot: {crypto_balance} USDT
-⚠️ ВНИМАНИЕ: После подтверждения будет создан чек на всю сумму!
-
-Вы уверены, что хотите вывести казну?""",
-            reply_markup=keyboard
-        )
-    finally:
-        session.close()
-    
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("confirm_treasury_"))
-async def confirm_treasury_withdraw(callback: CallbackQuery, state: FSMContext):
-    amount = float(callback.data.split("_")[2])
-    
-    await state.set_state(AdminStates.waiting_withdraw_address)
-    await state.update_data(withdraw_amount=amount)
-    
-    await callback.message.edit_text(
-        f"""💰 ВЫВОД КАЗНЫ
-
-💰 Сумма: {amount}$
-
-Введите адрес USDT (TRC20) для вывода:""",
-        reply_markup=back_keyboard()
+    await message.answer(
+        "⚙️ Админ панель\nВыберите действие:",
+        reply_markup=get_admin_keyboard()
     )
-    await callback.answer()
 
-
-@dp.message(AdminStates.waiting_withdraw_address)
-async def process_treasury_withdraw_address(message: Message, state: FSMContext):
-    address = message.text.strip()
-    
-    # Базовая проверка TRC20 адреса
-    if not address.startswith("T") or len(address) < 30:
-        await message.reply("❌ Похоже, это невалидный адрес TRC20. Адрес должен начинаться с 'T' и содержать 34 символа.\nПопробуйте снова:")
+@dp.message(Command("rabotyaga"))
+async def cmd_worker(message: Message, state: FSMContext):
+    """Панель работяги"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_worker']:
+        await message.answer("⛔ У вас нет доступа к панели работяги.")
         return
-
-    data = await state.get_data()
-    amount = data.get("withdraw_amount", 0)
-
-    session = SessionLocal()
-    try:
-        stats = session.query(BotStats).first()
-        
-        if not stats or stats.treasury_balance < amount:
-            await message.reply("❌ Недостаточно средств в казне!")
-            await state.clear()
-            return
-
-        # Проверяем баланс CryptoBot перед созданием чека
-        crypto_balance = await crypto.check_crypto_balance("USDT")
-        if crypto_balance < amount:
-            await message.reply(
-                f"""❌ Недостаточно средств на CryptoBot!
-
-💰 Доступно: {crypto_balance} USDT
-💰 Запрошено: {amount} USDT
-Пожалуйста, пополните баланс CryptoBot."""
-            )
-            await state.clear()
-            return
-
-        try:
-            # СОЗДАЕМ ЧЕК ЧЕРЕЗ CRYPTOBOT API
-            check_result = await crypto.create_check(amount, "USDT", f"Вывод казны на {address}")
-            
-            if check_result.get("ok"):
-                check_data = check_result["result"]
-                check_id = check_data["check_id"]
-                check_url = check_data["url"]
-                
-                # Обнуляем казну
-                stats.treasury_balance = 0
-                session.commit()
-                
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(text="🔗 Активировать чек", url=check_url),
-                            InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_treasury_{check_id}")
-                        ],
-                        [
-                            InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")
-                        ]
-                    ]
-                )
-
-                await message.reply(
-                    f"""🧾 ЧЕК НА ВЫВОД КАЗНЫ
-
-💰 Сумма: {amount}$
-💳 Адрес: {address}
-🆔 ID чека: {check_id}
-
-🔗 ССЫЛКА ДЛЯ АКТИВАЦИИ:
-{check_url}
-
-📱 Перейдите по ссылке и активируйте чек
-После активации средства поступят на указанный кошелек
-
-⚠️ Чек активен 1 час!""",
-                    reply_markup=keyboard
-                )
-                
-                await state.clear()
-            else:
-                error_msg = check_result.get("error", "Неизвестная ошибка")
-                await message.reply(f"❌ Ошибка при создании чека: {error_msg}")
-                
-        except Exception as e:
-            logger.error(f"Error creating treasury check: {e}")
-            await message.reply("❌ Ошибка при создании чека. Попробуйте позже.")
-            
-    finally:
-        session.close()
-
-
-@dp.callback_query(lambda c: c.data.startswith("check_treasury_"))
-async def check_treasury_status(callback: CallbackQuery):
-    check_id = callback.data.split("_")[2]
-
-    try:
-        status_result = await crypto.get_check_status(check_id)
-        if status_result.get("ok"):
-            status = status_result["result"]["status"]
-            if status == "paid" or status == "active":
-                await callback.message.edit_text(
-                    f"✅ ЧЕК АКТИВИРОВАН!\n🆔 ID: {check_id}\n\n📌 Средства переведены на указанный кошелек.",
-                    reply_markup=back_keyboard()
-                )
-            elif status == "expired":
-                await callback.message.edit_text(
-                    "❌ Срок действия чека истек.",
-                    reply_markup=back_keyboard()
-                )
-            else:
-                await callback.message.edit_text(
-                    f"⏳ Чек еще не активирован. Статус: {status}",
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_treasury_{check_id}")],
-                            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-                        ]
-                    )
-                )
-    except Exception as e:
-        logger.error(f"Error checking treasury status: {e}")
-        await callback.message.edit_text("❌ Ошибка при проверке статуса.")
-
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Баланс CryptoBot ----------
-@dp.callback_query(lambda c: c.data == "secret_crypto_balance")
-async def secret_crypto_balance(callback: CallbackQuery):
-    try:
-        usdt_balance = await crypto.check_crypto_balance("USDT")
-        btc_balance = await crypto.check_crypto_balance("BTC")
-        eth_balance = await crypto.check_crypto_balance("ETH")
-        ton_balance = await crypto.check_crypto_balance("TON")
-        
-        text = f"""💰 БАЛАНС CRYPTOBOT
-
-🟢 USDT: {usdt_balance} USDT
-🟡 BTC: {btc_balance} BTC
-🔵 ETH: {eth_balance} ETH
-🟣 TON: {ton_balance} TON
-
-💡 Этот баланс используется для создания чеков на вывод."""
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=back_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"Error getting crypto balance: {e}")
-        await callback.message.edit_text(
-            "❌ Ошибка при получении баланса CryptoBot",
-            reply_markup=back_keyboard()
-        )
     
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Статистика ----------
-@dp.callback_query(lambda c: c.data == "secret_stats")
-async def secret_stats(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        stats = session.query(BotStats).first()
-        if not stats:
-            stats = BotStats()
-            session.add(stats)
-            session.commit()
-
-        total_users = session.query(User).count()
-        blocked_users = session.query(User).filter_by(is_blocked=True).count()
-        total_balance = session.query(func.sum(User.balance)).scalar() or 0
-
-        text = f"""📊 Вся статистика
-
-👥 Всего пользователей: {total_users}
-🔒 Заблокировано: {blocked_users}
-💰 Общий баланс: {total_balance}$
-💰 Казнa: {stats.treasury_balance}$
-📤 Всего взято номеров: {stats.total_taken}
-📤 Всего отстояло: {stats.total_stood}
-📉 Всего слетело: {stats.total_failed}
-💰 Общая прибыль: {stats.total_profit}$"""
-    finally:
-        session.close()
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="secret_stats")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-        ]
-    )
-
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Пользователи ----------
-@dp.callback_query(lambda c: c.data == "secret_users")
-async def secret_users(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        users = session.query(User).limit(20).all()
-
-        keyboard_buttons = []
-        for user in users[:20]:
-            status = "✅" if not user.is_blocked else "🔒"
-            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            keyboard_buttons.append([InlineKeyboardButton(
-                text=f"{status} {username} (${user.balance:.2f})", 
-                callback_data=f"secret_user_{user.telegram_id}"
-            )])
-
-        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    finally:
-        session.close()
-    
-    await callback.message.edit_text("👥 Пользователи (показаны первые 20):", reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_user_"))
-async def secret_user_detail(callback: CallbackQuery):
-    telegram_id = int(callback.data.split("_")[2])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-
-        text = f"""👤 Пользователь
-
-🆔 ID: {user.telegram_id}
-👤 Username: @{user.username or 'Не указан'}
-💰 Баланс: {user.balance}$
-📅 Дата регистрации: {user.registered_at.strftime('%d.%m.%Y')}
-🔒 Статус: {'Заблокирован' if user.is_blocked else 'Активен'}
-📤 Взято: {user.total_taken}
-✅ Отстояло: {user.total_stood}
-❌ Слетело: {user.total_failed}"""
-
-        keyboard_buttons = []
-        if user.is_blocked:
-            keyboard_buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"secret_unblock_{user.telegram_id}")])
-        else:
-            keyboard_buttons.append([InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"secret_block_{user.telegram_id}")])
-        
-        keyboard_buttons.append([
-            InlineKeyboardButton(text="➕ +10$", callback_data=f"secret_add_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➕ +50$", callback_data=f"secret_add_balance_{user.telegram_id}_50")
-        ])
-        keyboard_buttons.append([
-            InlineKeyboardButton(text="➖ -10$", callback_data=f"secret_sub_balance_{user.telegram_id}_10"),
-            InlineKeyboardButton(text="➖ -50$", callback_data=f"secret_sub_balance_{user.telegram_id}_50")
-        ])
-        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="secret_users")])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    finally:
-        session.close()
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_block_"))
-async def secret_block_user(callback: CallbackQuery):
-    telegram_id = int(callback.data.split("_")[2])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-        user.is_blocked = True
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text("✅ Пользователь заблокирован")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_unblock_"))
-async def secret_unblock_user(callback: CallbackQuery):
-    telegram_id = int(callback.data.split("_")[2])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-        user.is_blocked = False
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text("✅ Пользователь разблокирован")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_add_balance_"))
-async def secret_add_balance(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    telegram_id = int(parts[3])
-    amount = float(parts[4])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-        user.balance += amount
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text(f"✅ Добавлено {amount}$ на баланс пользователя")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_sub_balance_"))
-async def secret_sub_balance(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    telegram_id = int(parts[3])
-    amount = float(parts[4])
-
-    session = SessionLocal()
-    try:
-        user = get_user(session, telegram_id)
-
-        if user.balance < amount:
-            await callback.message.edit_text(f"❌ Недостаточно средств. Баланс: {user.balance}$")
-            return
-
-        user.balance -= amount
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text(f"✅ Снято {amount}$ с баланса пользователя")
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Балансы ----------
-@dp.callback_query(lambda c: c.data == "secret_balances")
-async def secret_balances(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        users = session.query(User).filter(User.balance > 0).order_by(User.balance.desc()).limit(20).all()
-        total_balance = session.query(func.sum(User.balance)).scalar() or 0
-
-        text = "💰 Топ пользователей по балансу\n\n"
-
-        if not users:
-            text += "Нет пользователей с балансом"
-        else:
-            for i, user in enumerate(users[:20], 1):
-                username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-                text += f"{i}. {username} — {user.balance:.2f}$\n"
-
-            text += f"\n💰 Общий баланс всех пользователей: {total_balance:.2f}$"
-    finally:
-        session.close()
-
-    await callback.message.edit_text(text, reply_markup=back_keyboard())
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Пополнить казну ----------
-@dp.callback_query(lambda c: c.data == "secret_topup")
-async def secret_topup(callback: CallbackQuery):
-    amounts = [10, 25, 50, 100, 500, 1000]
-    keyboard_buttons = []
-    row = []
-    for amount in amounts:
-        row.append(InlineKeyboardButton(text=f"💰 {amount}$", callback_data=f"secret_topup_{amount}"))
-        if len(row) == 3:
-            keyboard_buttons.append(row)
-            row = []
-    if row:
-        keyboard_buttons.append(row)
-    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-    session = SessionLocal()
-    try:
-        stats = session.query(BotStats).first()
-        balance = stats.treasury_balance if stats else 0
-    finally:
-        session.close()
-
-    await callback.message.edit_text(
-        f"""💰 ПОПОЛНЕНИЕ КАЗНЫ
-
-💰 Текущий баланс казны: {balance}$
-
-Выберите сумму для пополнения:
-📌 После оплаты баланс казны пополнится автоматически""",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_topup_"))
-async def secret_process_topup(callback: CallbackQuery):
-    amount = float(callback.data.split("_")[2])
-
-    try:
-        invoice_result = await crypto.create_invoice(amount, "USDT", f"Пополнение казны {amount} USDT")
-        if invoice_result.get("ok"):
-            invoice_data = invoice_result["result"]
-            invoice_id = invoice_data["invoice_id"]
-            invoice_url = invoice_data["url"]
-
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🔗 Оплатить счет", url=invoice_url),
-                        InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"secret_check_invoice_{invoice_id}")
-                    ],
-                    [
-                        InlineKeyboardButton(text="🔙 Назад", callback_data="secret_topup")
-                    ]
-                ]
-            )
-
-            await callback.message.edit_text(
-                f"""💳 СЧЕТ НА ОПЛАТУ
-
-💰 Сумма: {amount}$
-🆔 ID счета: {invoice_id}
-
-🔗 ССЫЛКА ДЛЯ ОПЛАТЫ:
-{invoice_url}
-
-📱 Перейдите по ссылке и оплатите счет
-После оплаты баланс казны пополнится автоматически
-
-⚠️ Для проверки оплаты нажмите кнопку ниже!""",
-                reply_markup=keyboard
-            )
-        else:
-            error_msg = invoice_result.get("error", "Неизвестная ошибка")
-            await callback.message.edit_text(f"❌ Ошибка при создании счета: {error_msg}")
-    except Exception as e:
-        logger.error(f"Error creating invoice: {e}")
-        await callback.message.edit_text("❌ Ошибка при создании счета. Попробуйте позже.")
-
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data.startswith("secret_check_invoice_"))
-async def secret_check_invoice(callback: CallbackQuery):
-    invoice_id = callback.data.split("_")[3]
-
-    try:
-        # Проверяем статус счета через API
-        status_result = await crypto.get_check_status(invoice_id)
-        
-        if status_result.get("ok"):
-            status = status_result["result"]["status"]
-            
-            if status == "paid":
-                session = SessionLocal()
-                try:
-                    stats = session.query(BotStats).first()
-                    if stats:
-                        # Здесь нужно получить сумму из счета
-                        # Для примера добавляем 100
-                        stats.treasury_balance += 100
-                        session.commit()
-                finally:
-                    session.close()
-
-                await callback.message.edit_text(
-                    f"""✅ ОПЛАТА ПОДТВЕРЖДЕНА!
-
-💰 Баланс казны пополнен!
-💳 Счет оплачен: {invoice_id}
-
-📌 Текущий баланс обновлен""",
-                    reply_markup=back_keyboard("secret_topup")
-                )
-            elif status == "expired":
-                await callback.message.edit_text(
-                    "❌ Срок действия счета истек. Создайте новый счет."
-                )
-            else:
-                await callback.message.edit_text(
-                    f"⏳ Счет еще не оплачен. Статус: {status}",
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"secret_check_invoice_{invoice_id}")],
-                            [InlineKeyboardButton(text="🔙 Назад", callback_data="secret_topup")]
-                        ]
-                    )
-                )
-        else:
-            await callback.message.edit_text("❌ Ошибка при проверке оплаты.")
-    except Exception as e:
-        logger.error(f"Error checking invoice: {e}")
-        await callback.message.edit_text("❌ Ошибка при проверке оплаты.")
-
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Рассылка ----------
-@dp.callback_query(lambda c: c.data == "secret_mailing")
-async def secret_mailing(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.waiting_mailing_text)
-    await callback.message.edit_text(
-        "📨 Рассылка\n\nОтправьте текст для рассылки.\nМожно также отправить фото с подписью.\n\n⚠️ Будьте осторожны! Рассылка уйдет ВСЕМ пользователям!",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.message(AdminStates.waiting_mailing_text)
-async def secret_process_mailing(message: Message, state: FSMContext):
-    text = message.text or message.caption
-    photo = message.photo[-1].file_id if message.photo else None
-
-    # Запрашиваем подтверждение
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_mailing"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_menu")
-            ]
-        ]
-    )
-    
-    await state.update_data(mailing_text=text, mailing_photo=photo)
-    
-    preview = "📨 ПРЕВЬЮ РАССЫЛКИ\n\n"
-    if photo:
-        await message.reply_photo(photo, caption=preview + text, reply_markup=keyboard)
-    else:
-        await message.reply(preview + text, reply_markup=keyboard)
-
-
-@dp.callback_query(lambda c: c.data == "confirm_mailing")
-async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    text = data.get("mailing_text")
-    photo = data.get("mailing_photo")
-
-    if not text:
-        await callback.message.edit_text("❌ Текст рассылки не найден.")
-        await state.clear()
-        return
-
-    session = SessionLocal()
-    try:
-        users = session.query(User).filter_by(is_blocked=False).all()
-
-        await callback.message.edit_text(f"📨 Начинаю рассылку...\nВсего: {len(users)}")
-
-        sent = 0
-        failed = 0
-
-        for user in users:
-            try:
-                if photo:
-                    await bot.send_photo(user.telegram_id, photo, caption=text)
-                else:
-                    await bot.send_message(user.telegram_id, text)
-                sent += 1
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                logger.error(f"Failed to send to {user.telegram_id}: {e}")
-                failed += 1
-    finally:
-        session.close()
-
-    await callback.message.edit_text(
-        f"""✅ Рассылка завершена!
-
-📨 Всего: {len(users)}
-✅ Отправлено: {sent}
-❌ Ошибок: {failed}"""
-    )
     await state.clear()
-
-
-# ---------- СЕКРЕТНАЯ: История выводов ----------
-@dp.callback_query(lambda c: c.data == "secret_withdraw_history")
-async def secret_withdraw_history(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        withdraws = session.query(WithdrawRequest).order_by(WithdrawRequest.created_at.desc()).limit(30).all()
-
-        if not withdraws:
-            await callback.message.edit_text(
-                "📊 История выводов пуста",
-                reply_markup=back_keyboard()
-            )
-            return
-
-        text = "📊 История выводов\n\n"
-
-        for w in withdraws[:30]:
-            user = get_user(session, w.user_id)
-            username = f"@{user.username}" if user.username else f"ID:{user.telegram_id}"
-            status_emoji = "✅" if w.status == "completed" else "⏳" if w.status == "pending" else "❌"
-            text += f"""{status_emoji} {w.created_at.strftime('%d.%m.%Y %H:%M')}
-👤 {username}
-💰 {w.amount}$
-🆔 {w.check_id or 'Нет ID'}
-— — — — — — — — — —
-"""
-    finally:
-        session.close()
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="secret_withdraw_history")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-        ]
+    await message.answer(
+        "🔧 Панель работяги\nВыберите действие:",
+        reply_markup=get_worker_keyboard()
     )
 
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    except Exception as e:
-        if "message is not modified" in str(e):
-            await callback.answer("🔄 Данные актуальны")
-        else:
-            raise
-    await callback.answer()
+# --- Обработчики главного меню ---
 
-
-# ---------- СЕКРЕТНАЯ: Расчет оплат ----------
-@dp.callback_query(lambda c: c.data == "secret_calculate_payments")
-async def secret_calculate_payments(callback: CallbackQuery):
-    session = SessionLocal()
-    try:
-        items = session.query(QueueItem).filter_by(queue_type="normal", status="stood", is_paid=False).all()
-
-        if not items:
-            await callback.message.edit_text(
-                "💥 Нет номеров для расчета оплат",
-                reply_markup=back_keyboard()
-            )
-            return
-
-        total = 0
-        count = 0
-        for item in items:
-            user = get_user(session, item.user_id)
-            if item.minutes_stood >= MIN_TIME_TO_EARN:
-                user.balance += item.price
-                user.total_stood += 1
-                user.total_profit += item.price
-
-                today = datetime.now().strftime("%Y-%m-%d")
-                if user.daily_date == today:
-                    user.daily_stood += 1
-                    user.daily_profit += item.price
-                else:
-                    user.daily_stood = 1
-                    user.daily_profit = item.price
-                    user.daily_date = today
-
-                item.is_paid = True
-                total += item.price
-                count += 1
-
-        session.commit()
-    finally:
-        session.close()
-
-    await callback.message.edit_text(
-        f"""💥 РАСЧЕТ ОПЛАТ ВЫПОЛНЕН!
-
-✅ Оплачено номеров: {count}
-💰 Общая сумма: {total}$
-
-Все пользователи получили начисления на баланс.""",
-        reply_markup=back_keyboard()
+@dp.message(F.text == "📱 Сдать номер")
+async def sell_number(message: Message, state: FSMContext):
+    """Начало процесса сдачи номера"""
+    user = get_user(message.from_user.id)
+    if user['is_banned']:
+        await message.answer("⛔ Вы заблокированы.")
+        return
+    
+    await state.set_state(UserStates.entering_phone)
+    await message.answer(
+        "📱 Введите номер телефона.\n\n"
+        "Поддерживаемые форматы:\n"
+        "• 10 цифр: 7XXXXXXXXX или 8XXXXXXXXX\n"
+        "• 9 цифр: 9XXXXXXXX → автоматически 7XXXXXXXXX\n"
+        "• С поддержкой символов: +, пробелы, скобки\n\n"
+        "Примеры: +79123456789, 79123456789, 9123456789\n\n"
+        "Для отмены отправьте /cancel"
     )
-    await callback.answer()
-
-
-# ---------- СЕКРЕТНАЯ: Редактировать прайс ----------
-@dp.callback_query(lambda c: c.data == "secret_edit_price")
-async def secret_edit_price(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.waiting_price)
-    await callback.message.edit_text(
-        f"""📝 Редактирование прайса
-
-💰 Текущая цена: {PRICE_NORMAL}$
-
-Введите новую цену за 10+ минут:""",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.message(AdminStates.waiting_price)
-async def secret_process_price(message: Message, state: FSMContext):
-    try:
-        new_price = float(message.text.replace(",", "."))
-        if new_price <= 0:
-            await message.reply("❌ Цена должна быть больше 0")
-            return
-
-        global PRICE_NORMAL
-        PRICE_NORMAL = new_price
-
-        await message.reply(f"✅ Цена обновлена! Новая цена: {PRICE_NORMAL}$")
-        await state.clear()
-    except ValueError:
-        await message.reply("❌ Введите корректное число")
-
-
-# ==================== ОБНОВЛЕНИЕ СТАТИСТИКИ ====================
-
-async def update_daily_stats():
-    session = SessionLocal()
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        users = session.query(User).all()
-        for user in users:
-            if user.daily_date != today:
-                user.daily_taken = 0
-                user.daily_stood = 0
-                user.daily_failed = 0
-                user.daily_profit = 0
-                user.daily_date = today
-
-        session.commit()
-        logger.info("Daily stats updated")
-    finally:
-        session.close()
-
-
-async def update_bot_stats():
-    session = SessionLocal()
-    try:
-        stats = session.query(BotStats).first()
-        if not stats:
-            stats = BotStats()
-            session.add(stats)
-
-        stats.total_users = session.query(User).count()
-        stats.total_blocked = session.query(User).filter_by(is_blocked=True).count()
-        stats.total_balance = session.query(func.sum(User.balance)).scalar() or 0
-        stats.last_updated = datetime.now()
-
-        session.commit()
-        logger.info("Bot stats updated")
-    finally:
-        session.close()
-
-
-# ==================== СОБЫТИЯ ЗАПУСКА/ОСТАНОВКИ ====================
-
-async def on_startup():
-    """Действия при запуске бота"""
-    scheduler.add_job(update_daily_stats, CronTrigger(hour=0, minute=0))
-    scheduler.add_job(update_bot_stats, CronTrigger(hour=0, minute=5))
-    
-    scheduler.start()
-    logger.info("Планировщик запущен")
-    
-    Base.metadata.create_all(engine)
-    logger.info("База данных инициализирована")
-    
-    # Проверка подключения к CryptoBot API
-    try:
-        balance = await crypto.check_crypto_balance("USDT")
-        logger.info(f"CryptoBot API подключен. Баланс USDT: {balance}")
-    except Exception as e:
-        logger.error(f"Ошибка подключения к CryptoBot API: {e}")
-
-
-async def on_shutdown():
-    """Действия при остановке бота"""
-    scheduler.shutdown()
-    logger.info("Планировщик остановлен")
-
-
-# ==================== ЗАПУСК ====================
 
 @dp.message(Command("cancel"))
 async def cancel_command(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
+    """Отмена текущего действия"""
+    await state.clear()
+    await message.answer(
+        "❌ Действие отменено.",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+@dp.message(UserStates.entering_phone)
+async def process_phone(message: Message, state: FSMContext):
+    """Обработка ввода номера"""
+    phone = message.text.strip()
+    
+    # Очистка номера от лишних символов
+    cleaned = re.sub(r'[+\s()\-]', '', phone)
+    
+    # Проверка и форматирование
+    if len(cleaned) == 10 and cleaned.startswith('7'):
+        formatted = cleaned
+    elif len(cleaned) == 10 and cleaned.startswith('8'):
+        formatted = '7' + cleaned[1:]
+    elif len(cleaned) == 9 and cleaned.startswith('9'):
+        formatted = '7' + cleaned
+    elif len(cleaned) == 11 and cleaned.startswith('7'):
+        formatted = cleaned
+    else:
+        await message.answer(
+            "❌ Неверный формат номера.\n"
+            "Пожалуйста, введите номер в одном из поддерживаемых форматов.\n\n"
+            "Для отмены отправьте /cancel"
+        )
+        return
+    
+    await state.update_data(phone=formatted)
+    await state.set_state(UserStates.selecting_queue)
+    
+    await message.answer(
+        f"📱 Номер: +{formatted}\n\n"
+        "Выберите тип очереди:",
+        reply_markup=get_queue_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("queue_"))
+async def select_queue(callback: CallbackQuery, state: FSMContext):
+    """Выбор очереди"""
+    queue_type = callback.data.split("_")[1]
+    
+    if queue_type == "back":
+        await state.clear()
+        await callback.message.edit_text(
+            "Главное меню",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Вы вернулись в главное меню.",
+            reply_markup=get_main_keyboard(callback.from_user.id)
+        )
+        await callback.answer()
+        return
+    
+    data = await state.get_data()
+    phone = data.get('phone')
+    
+    price = float(get_setting('vip_price') if queue_type == 'vip' else 'price'))
+    
+    await state.update_data(queue_type=queue_type, price=price)
+    await state.set_state(UserStates.confirm_number)
+    
+    queue_names = {
+        'vip': '⚡ VIP (вне очереди)',
+        'regular': '💰 Обычная'
+    }
+    
+    text = (
+        f"📱 Номер: +{phone}\n"
+        f"📋 Тип: {queue_names[queue_type]}\n"
+        f"💵 Цена: {price}$ за 10+ минут\n"
+        f"📊 Статус: Ожидание\n\n"
+        "Подтвердите добавление номера:"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_confirm_keyboard(phone, queue_type, price)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_"))
+async def confirm_number(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение добавления номера"""
+    _, phone, queue_type, price = callback.data.split("_")
+    price = float(price)
+    
+    user = get_user(callback.from_user.id)
+    
+    # Добавляем номер в базу
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO numbers (user_id, phone_number, queue_type, price, status)
+            VALUES (?, ?, ?, ?, 'waiting')
+        ''', (user['id'], phone, queue_type, price))
+        conn.commit()
+        number_id = cursor.lastrowid
+    
+    await state.clear()
+    
+    await callback.message.edit_text(
+        f"✅ Номер +{phone} успешно добавлен в очередь {queue_type}!\n"
+        f"💵 Цена: {price}$\n"
+        f"📊 Статус: Ожидание",
+        reply_markup=None
+    )
+    await callback.message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_cancel")
+async def confirm_cancel(callback: CallbackQuery, state: FSMContext):
+    """Отмена добавления номера"""
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Добавление номера отменено.",
+        reply_markup=None
+    )
+    await callback.message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+# --- Обработчики кнопок главного меню ---
+
+@dp.message(F.text == "👤 Профиль")
+async def profile(message: Message):
+    """Профиль пользователя"""
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("❌ Ошибка: пользователь не найден.")
+        return
+    
+    text = (
+        f"👤 Профиль\n\n"
+        f"🔹 Username: @{message.from_user.username or 'Не указан'}\n"
+        f"💰 Цена за аккаунт: {get_setting('price')}$\n"
+        f"💵 Баланс: {user['balance']}$\n"
+        f"📅 Дата регистрации: {user['registered_at']}\n"
+        f"🎭 Роль: {'Администратор' if user['is_admin'] else 'Работяга' if user['is_worker'] else 'Пользователь'}"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="profile_stats"),
+        InlineKeyboardButton(text="💸 Вывод", callback_data="profile_withdraw")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📋 Моя очередь", callback_data="profile_queue"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="profile_back")
+    )
+    
+    await message.answer(text, reply_markup=builder.as_markup())
+
+@dp.message(F.text == "📋 Моя очередь")
+async def my_queue(message: Message):
+    """Моя очередь"""
+    user = get_user(message.from_user.id)
+    numbers = get_user_numbers(user['id'])
+    
+    if not numbers:
+        await message.answer("📭 У вас нет номеров в очереди.")
+        return
+    
+    text = "📋 Моя очередь:\n\n"
+    queue_names = {
+        'vip': '⚡ VIP',
+        'regular': '💰 Обычная'
+    }
+    status_names = {
+        'waiting': '⏳ Ожидает',
+        'in_progress': '🔄 В работе',
+        'completed': '✅ Отстоял',
+        'failed': '❌ Слет'
+    }
+    
+    for num in numbers[:10]:  # Показываем последние 10
+        text += (
+            f"📱 +{num['phone_number']}\n"
+            f"📋 {queue_names.get(num['queue_type'], num['queue_type'])}\n"
+            f"💵 {num['price']}$\n"
+            f"📊 {status_names.get(num['status'], num['status'])}\n"
+            f"🕐 {num['created_at']}\n\n"
+        )
+    
+    if len(numbers) > 10:
+        text += f"\n... и еще {len(numbers) - 10} номеров"
+    
+    await message.answer(text)
+
+@dp.message(F.text == "🆘 Тех поддержка")
+async def support(message: Message):
+    """Тех поддержка"""
+    await message.answer(
+        "🆘 Тех поддержка\n\n"
+        "Если у вас возникли вопросы или проблемы, обратитесь в нашу службу поддержки:\n"
+        "👤 @support_bot\n\n"
+        "Мы всегда рады помочь! 😊"
+    )
+
+# --- Профиль (callback) ---
+
+@dp.callback_query(F.data == "profile_back")
+async def profile_back(callback: CallbackQuery):
+    """Назад из профиля"""
+    await callback.message.delete()
+    await callback.message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile_queue")
+async def profile_queue(callback: CallbackQuery):
+    """Моя очередь из профиля"""
+    user = get_user(callback.from_user.id)
+    numbers = get_user_numbers(user['id'])
+    
+    if not numbers:
+        await callback.message.answer("📭 У вас нет номеров в очереди.")
+        await callback.answer()
+        return
+    
+    text = "📋 Моя очередь:\n\n"
+    queue_names = {
+        'vip': '⚡ VIP',
+        'regular': '💰 Обычная'
+    }
+    status_names = {
+        'waiting': '⏳ Ожидает',
+        'in_progress': '🔄 В работе',
+        'completed': '✅ Отстоял',
+        'failed': '❌ Слет'
+    }
+    
+    for num in numbers[:10]:
+        text += (
+            f"📱 +{num['phone_number']}\n"
+            f"📋 {queue_names.get(num['queue_type'], num['queue_type'])}\n"
+            f"💵 {num['price']}$\n"
+            f"📊 {status_names.get(num['status'], num['status'])}\n"
+            f"🕐 {num['created_at']}\n\n"
+        )
+    
+    if len(numbers) > 10:
+        text += f"\n... и еще {len(numbers) - 10} номеров"
+    
+    await callback.message.answer(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile_stats")
+async def profile_stats(callback: CallbackQuery):
+    """Статистика пользователя"""
+    user = get_user(callback.from_user.id)
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # За сегодня
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM numbers 
+            WHERE user_id = ? AND DATE(created_at) = ?
+        ''', (user['id'], today))
+        today_stats = cursor.fetchone()
+        
+        # За всё время
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM numbers 
+            WHERE user_id = ?
+        ''', (user['id'],))
+        all_stats = cursor.fetchone()
+        
+        # Прибыль (только выполненные номера)
+        cursor.execute('''
+            SELECT COALESCE(SUM(price), 0) as profit
+            FROM numbers 
+            WHERE user_id = ? AND status = 'completed' AND is_paid = 1
+        ''', (user['id'],))
+        profit = cursor.fetchone()
+    
+    today_text = f"За сегодня:\n• Взято: {today_stats['total']}\n• Отстояло: {today_stats['completed']}\n• Слёт: {today_stats['failed']}"
+    all_text = f"За всё время:\n• Взято: {all_stats['total']}\n• Отстояло: {all_stats['completed']}\n• Слёт: {all_stats['failed']}\n• Прибыль: {profit['profit']}$"
+    
+    await callback.message.answer(
+        f"📊 Статистика\n\n{today_text}\n\n{all_text}"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile_withdraw")
+async def profile_withdraw(callback: CallbackQuery, state: FSMContext):
+    """Вывод средств"""
+    user = get_user(callback.from_user.id)
+    min_withdrawal = float(get_setting('min_withdrawal'))
+    
+    if user['balance'] < min_withdrawal:
+        await callback.message.answer(
+            f"❌ Минимальная сумма вывода: {min_withdrawal}$\n"
+            f"Ваш баланс: {user['balance']}$"
+        )
+        await callback.answer()
+        return
+    
+    await state.set_state(UserStates.selecting_withdrawal)
+    
+    text = (
+        f"💸 Вывод средств\n\n"
+        f"💰 Ваш баланс: {user['balance']}$\n"
+        f"📉 Минимальная сумма: {min_withdrawal}$\n\n"
+        "Выберите сумму:"
+    )
+    
+    await callback.message.answer(text, reply_markup=get_withdrawal_keyboard())
+    await callback.answer()
+
+# --- Вывод средств ---
+
+@dp.callback_query(F.data.startswith("withdraw_"), UserStates.selecting_withdrawal)
+async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
+    """Обработка вывода средств"""
+    action = callback.data.split("_")[1]
+    user = get_user(callback.from_user.id)
+    
+    if action == "back":
+        await state.clear()
+        await callback.message.delete()
+        await callback.message.answer(
+            "Главное меню",
+            reply_markup=get_main_keyboard(callback.from_user.id)
+        )
+        await callback.answer()
+        return
+    
+    if action == "all":
+        amount = user['balance']
+    else:
+        amount = float(action)
+    
+    if amount > user['balance']:
+        await callback.message.answer(
+            f"❌ Недостаточно средств.\n"
+            f"Ваш баланс: {user['balance']}$\n"
+            f"Запрошено: {amount}$"
+        )
+        await callback.answer()
+        return
+    
+    # Создаем запись о выводе
+    check_id = f"check_{user['telegram_id']}_{datetime.now().timestamp()}"
+    expires_at = datetime.now() + timedelta(hours=1)
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO withdrawals (user_id, amount, check_id, expires_at)
+            VALUES (?, ?, ?, ?)
+        ''', (user['id'], amount, check_id, expires_at))
+        conn.commit()
+        withdrawal_id = cursor.lastrowid
+    
+    await state.clear()
+    
+    text = (
+        f"✅ Чек создан!\n\n"
+        f"💰 Сумма: {amount}$\n"
+        f"🆔 ID чека: {check_id}\n"
+        f"⏳ Срок действия: 1 час\n\n"
+        f"🔗 Ссылка для активации: https://t.me/CryptoBot?start={check_id}\n\n"
+        f"⚠️ Чек будет действителен в течение 1 часа.\n"
+        f"После активации средства будут автоматически зачислены."
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔗 Активировать чек", url=f"https://t.me/CryptoBot?start={check_id}"),
+        InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_status_{withdrawal_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="check_back")
+    )
+    
+    await callback.message.answer(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("check_status_"))
+async def check_withdrawal_status(callback: CallbackQuery):
+    """Проверка статуса вывода"""
+    _, withdrawal_id = callback.data.split("_")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM withdrawals WHERE id = ?', (withdrawal_id,))
+        withdrawal = cursor.fetchone()
+    
+    if not withdrawal:
+        await callback.message.answer("❌ Чек не найден.")
+        await callback.answer()
+        return
+    
+    status_names = {
+        'pending': '⏳ Ожидание',
+        'completed': '✅ Выполнено',
+        'expired': '❌ Истек'
+    }
+    
+    await callback.message.answer(
+        f"📊 Статус чека:\n\n"
+        f"🆔 ID: {withdrawal['check_id']}\n"
+        f"💰 Сумма: {withdrawal['amount']}$\n"
+        f"📊 Статус: {status_names.get(withdrawal['status'], withdrawal['status'])}\n"
+        f"📅 Создан: {withdrawal['created_at']}\n"
+        f"⏳ Истекает: {withdrawal['expires_at']}"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "check_back")
+async def check_back(callback: CallbackQuery):
+    """Назад из чека"""
+    await callback.message.delete()
+    await callback.message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+# --- Админ панель ---
+
+@dp.message(F.text == "⚙️ Админ панель")
+async def admin_panel(message: Message, state: FSMContext):
+    """Админ панель"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    await state.clear()
+    await message.answer(
+        "⚙️ Админ панель\nВыберите действие:",
+        reply_markup=get_admin_keyboard()
+    )
+
+@dp.message(F.text == "🔙 Закрыть")
+async def close_admin(message: Message, state: FSMContext):
+    """Закрыть админ панель"""
+    await state.clear()
+    await message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# --- Админ: Статистика ---
+
+@dp.message(F.text == "📊 Статистика")
+async def admin_stats(message: Message):
+    """Статистика для админа"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Всего пользователей
+        cursor.execute('SELECT COUNT(*) as count FROM users')
+        total_users = cursor.fetchone()['count']
+        
+        # Заблокировано
+        cursor.execute('SELECT COUNT(*) as count FROM users WHERE is_banned = 1')
+        banned_users = cursor.fetchone()['count']
+        
+        # Общий баланс
+        cursor.execute('SELECT COALESCE(SUM(balance), 0) as total FROM users')
+        total_balance = cursor.fetchone()['total']
+        
+        # Казнa
+        treasury = float(get_setting('treasury_balance'))
+        
+        # Статистика по номерам
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM numbers
+        ''')
+        stats = cursor.fetchone()
+        
+        # Прибыль
+        cursor.execute('SELECT COALESCE(SUM(price), 0) as profit FROM numbers WHERE status = "completed" AND is_paid = 1')
+        profit = cursor.fetchone()['profit']
+    
+    text = (
+        f"📊 Статистика\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"🔒 Заблокировано: {banned_users}\n"
+        f"💰 Общий баланс: {total_balance}$\n"
+        f"🏦 Казнa: {treasury}$\n\n"
+        f"📱 Номера:\n"
+        f"• Всего взято: {stats['total']}\n"
+        f"• Отстояло: {stats['completed']}\n"
+        f"• Слетело: {stats['failed']}\n"
+        f"• Прибыль: {profit}$"
+    )
+    
+    await message.answer(text)
+
+# --- Админ: Пользователи ---
+
+@dp.message(F.text == "👥 Пользователи")
+async def admin_users(message: Message):
+    """Список пользователей для админа"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM users 
+            ORDER BY registered_at DESC 
+            LIMIT 20
+        ''')
+        users = cursor.fetchall()
+    
+    if not users:
+        await message.answer("👥 Пользователей нет.")
+        return
+    
+    text = "👥 Пользователи (последние 20):\n\n"
+    for u in users:
+        status = "✅ активен" if not u['is_banned'] else "🔒 заблокирован"
+        role = "👑 админ" if u['is_admin'] else "🛠 работяга" if u['is_worker'] else "👤 пользователь"
+        text += f"• {status} | {role} | @{u['username'] or 'Не указан'} | {u['balance']}$\n"
+    
+    await message.answer(text)
+
+# --- Админ: Балансы ---
+
+@dp.message(F.text == "💰 Балансы")
+async def admin_balances(message: Message):
+    """Топ-10 балансов"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT username, balance 
+            FROM users 
+            ORDER BY balance DESC 
+            LIMIT 10
+        ''')
+        users = cursor.fetchall()
+    
+    if not users:
+        await message.answer("💰 Нет пользователей с балансом.")
+        return
+    
+    text = "💰 Топ-10 по балансу:\n\n"
+    for i, u in enumerate(users, 1):
+        text += f"{i}. @{u['username'] or 'Не указан'} - {u['balance']}$\n"
+    
+    await message.answer(text)
+
+# --- Админ: Пополнить казну ---
+
+@dp.message(F.text == "💰 Пополнить казну")
+async def admin_treasury(message: Message, state: FSMContext):
+    """Пополнение казны"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    treasury = float(get_setting('treasury_balance'))
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="10$", callback_data="treasury_10"),
+        InlineKeyboardButton(text="25$", callback_data="treasury_25"),
+        InlineKeyboardButton(text="50$", callback_data="treasury_50")
+    )
+    builder.row(
+        InlineKeyboardButton(text="100$", callback_data="treasury_100"),
+        InlineKeyboardButton(text="500$", callback_data="treasury_500"),
+        InlineKeyboardButton(text="1000$", callback_data="treasury_1000")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="treasury_back")
+    )
+    
+    await message.answer(
+        f"🏦 Текущий баланс казны: {treasury}$\n\n"
+        "Выберите сумму для пополнения:",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(F.data.startswith("treasury_"))
+async def process_treasury(callback: CallbackQuery):
+    """Обработка пополнения казны"""
+    action = callback.data.split("_")[1]
+    
+    if action == "back":
+        await callback.message.delete()
+        await callback.message.answer(
+            "Админ панель",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    amount = float(action)
+    treasury = float(get_setting('treasury_balance'))
+    new_treasury = treasury + amount
+    set_setting('treasury_balance', str(new_treasury))
+    
+    await callback.message.edit_text(
+        f"✅ Казнa пополнена на {amount}$!\n"
+        f"🏦 Новый баланс: {new_treasury}$",
+        reply_markup=None
+    )
+    
+    # Здесь должна быть интеграция с CryptoBot для создания счета
+    # и проверки оплаты
+    
+    await callback.answer()
+
+# --- Админ: Рассылка ---
+
+@dp.message(F.text == "📨 Рассылка")
+async def admin_broadcast(message: Message, state: FSMContext):
+    """Рассылка"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    await state.set_state(UserStates.admin_broadcast)
+    await message.answer(
+        "📨 Отправьте текст для рассылки.\n\n"
+        "Для отмены отправьте /cancel"
+    )
+
+@dp.message(UserStates.admin_broadcast)
+async def process_broadcast(message: Message, state: FSMContext):
+    """Отправка рассылки"""
+    text = message.text
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT telegram_id FROM users WHERE is_banned = 0')
+        users = cursor.fetchall()
+    
+    sent = 0
+    errors = 0
+    
+    for user in users:
+        try:
+            await bot.send_message(user['telegram_id'], text)
+            sent += 1
+            await asyncio.sleep(0.05)  # Чтобы не превысить лимиты
+        except Exception as e:
+            logger.error(f"Broadcast error to {user['telegram_id']}: {e}")
+            errors += 1
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Рассылка завершена!\n"
+        f"📨 Отправлено: {sent}\n"
+        f"❌ Ошибок: {errors}"
+    )
+
+# --- Админ: История выводов ---
+
+@dp.message(F.text == "📊 История выводов")
+async def admin_withdrawals(message: Message):
+    """История выводов"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT w.*, u.username 
+            FROM withdrawals w
+            JOIN users u ON w.user_id = u.id
+            ORDER BY w.created_at DESC 
+            LIMIT 20
+        ''')
+        withdrawals = cursor.fetchall()
+    
+    if not withdrawals:
+        await message.answer("📊 История выводов пуста.")
+        return
+    
+    text = "📊 Последние 20 выводов:\n\n"
+    status_icons = {
+        'pending': '⏳',
+        'completed': '✅',
+        'expired': '❌'
+    }
+    
+    for w in withdrawals:
+        text += (
+            f"{status_icons.get(w['status'], '❓')} "
+            f"@{w['username'] or 'Не указан'} | "
+            f"{w['amount']}$ | "
+            f"{w['created_at']}\n"
+        )
+    
+    await message.answer(text)
+
+# --- Админ: Расчет оплат ---
+
+@dp.message(F.text == "💥 Расчет оплат")
+async def admin_calculate_payments(message: Message):
+    """Расчет оплат для обычных номеров"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Находим все неоплаченные обычные номера со статусом "completed"
+        cursor.execute('''
+            SELECT n.*, u.telegram_id 
+            FROM numbers n
+            JOIN users u ON n.user_id = u.id
+            WHERE n.queue_type = 'regular' 
+            AND n.status = 'completed' 
+            AND n.is_paid = 0
+        ''')
+        numbers = cursor.fetchall()
+    
+    if not numbers:
+        await message.answer("💥 Нет номеров для оплаты.")
+        return
+    
+    total_amount = 0
+    paid_count = 0
+    
+    for num in numbers:
+        # Начисляем средства пользователю
+        add_balance(num['telegram_id'], num['price'])
+        
+        # Отмечаем номер как оплаченный
+        cursor.execute(
+            'UPDATE numbers SET is_paid = 1 WHERE id = ?',
+            (num['id'],)
+        )
+        
+        total_amount += num['price']
+        paid_count += 1
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                num['telegram_id'],
+                f"💰 Начислено {num['price']}$ за номер +{num['phone_number']}\n"
+                f"Тип: Обычная"
+            )
+        except Exception as e:
+            logger.error(f"Error notifying user {num['telegram_id']}: {e}")
+    
+    await message.answer(
+        f"✅ Расчет оплат завершен!\n"
+        f"💳 Оплачено номеров: {paid_count}\n"
+        f"💰 Общая сумма: {total_amount}$"
+    )
+
+# --- Админ: Редактировать прайс ---
+
+@dp.message(F.text == "📝 Редактировать прайс")
+async def admin_edit_price(message: Message, state: FSMContext):
+    """Редактирование прайса"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    current_price = get_setting('price')
+    current_vip_price = get_setting('vip_price')
+    
+    await state.set_state(UserStates.admin_edit_price)
+    await message.answer(
+        f"📝 Редактирование прайса\n\n"
+        f"💰 Текущая цена (обычная): {current_price}$\n"
+        f"⚡ Текущая цена (VIP): {current_vip_price}$\n\n"
+        f"Введите новую цену для обычной очереди:\n"
+        f"Для отмены отправьте /cancel"
+    )
+
+@dp.message(UserStates.admin_edit_price)
+async def process_edit_price(message: Message, state: FSMContext):
+    """Обработка изменения прайса"""
+    try:
+        price = float(message.text)
+        if price <= 0:
+            await message.answer("❌ Цена должна быть положительным числом.")
+            return
+        
+        set_setting('price', str(price))
+        await state.clear()
+        await message.answer(
+            f"✅ Цена обновлена!\n"
+            f"💰 Новая цена: {price}$"
+        )
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число.")
+
+# --- Админ: Установить фото ---
+
+@dp.message(F.text == "🖼 Установить фото")
+async def admin_set_photo(message: Message, state: FSMContext):
+    """Установка приветственного фото"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    await state.set_state(UserStates.admin_set_photo)
+    await message.answer(
+        "🖼 Отправьте фото для приветственного сообщения.\n\n"
+        "Фото будет отображаться при запуске бота.\n"
+        "Для отмены отправьте /cancel"
+    )
+
+@dp.message(UserStates.admin_set_photo, F.photo)
+async def process_set_photo(message: Message, state: FSMContext):
+    """Обработка установки фото"""
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    
+    # Сохраняем фото локально
+    file_path = f"welcome_photo_{message.from_user.id}.jpg"
+    await bot.download_file(file.file_path, file_path)
+    
+    set_setting('welcome_photo', file_path)
+    await state.clear()
+    
+    await message.answer(
+        "✅ Приветственное фото установлено!\n"
+        "Теперь оно будет отображаться при запуске бота."
+    )
+
+@dp.message(UserStates.admin_set_photo)
+async def set_photo_invalid(message: Message):
+    """Неверный формат для фото"""
+    await message.answer(
+        "❌ Пожалуйста, отправьте фото.\n\n"
+        "Для отмены отправьте /cancel"
+    )
+
+# --- Админ: Добавить работягу ---
+
+@dp.message(F.text == "➕ Добавить работягу")
+async def admin_add_worker(message: Message, state: FSMContext):
+    """Добавление работяги"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    await state.set_state(UserStates.admin_add_worker)
+    await message.answer(
+        "➕ Добавление работяги\n\n"
+        "Введите Telegram ID пользователя:\n"
+        "Для отмены отправьте /cancel"
+    )
+
+@dp.message(UserStates.admin_add_worker)
+async def process_add_worker(message: Message, state: FSMContext):
+    """Обработка добавления работяги"""
+    try:
+        telegram_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите корректный Telegram ID (число).")
+        return
+    
+    user = get_user(telegram_id)
+    if not user:
+        await message.answer("❌ Пользователь не найден. Убедитесь, что он запустил бота.")
+        return
+    
+    if user['is_worker']:
+        await message.answer("❌ Пользователь уже является работягой.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET is_worker = 1 WHERE telegram_id = ?',
+            (telegram_id,)
+        )
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Пользователь @{user['username'] or 'Не указан'} назначен работягой!"
+    )
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            telegram_id,
+            "🎉 Вас назначили работягой!\n"
+            "Теперь вы можете использовать команду /rabotyaga"
+        )
+    except Exception as e:
+        logger.error(f"Error notifying worker: {e}")
+
+# --- Админ: Список работяг ---
+
+@dp.message(F.text == "📋 Список работяг")
+async def admin_workers_list(message: Message):
+    """Список работяг"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM users 
+            WHERE is_worker = 1
+        ''')
+        workers = cursor.fetchall()
+    
+    if not workers:
+        await message.answer("📋 Нет работяг.")
+        return
+    
+    text = "📋 Список работяг:\n\n"
+    for w in workers:
+        text += (
+            f"• @{w['username'] or 'Не указан'}\n"
+            f"  🆔 ID: {w['telegram_id']}\n"
+            f"  💰 Баланс: {w['balance']}$\n"
+            f"  {'👑 Админ' if w['is_admin'] else '🛠 Работяга'}\n\n"
+        )
+    
+    await message.answer(text)
+
+# --- Работяга ---
+
+@dp.message(F.text == "🔧 Панель работяги")
+async def worker_panel(message: Message, state: FSMContext):
+    """Панель работяги"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_worker']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    await state.clear()
+    await message.answer(
+        "🔧 Панель работяги\nВыберите действие:",
+        reply_markup=get_worker_keyboard()
+    )
+
+@dp.message(F.text == "❌ Закрыть")
+async def close_worker(message: Message, state: FSMContext):
+    """Закрыть панель работяги"""
+    await state.clear()
+    await message.answer(
+        "Главное меню",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+@dp.message(F.text == "📱 Взять номер")
+async def worker_take_number(message: Message, state: FSMContext):
+    """Взять номер"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_worker']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    # Проверяем есть ли уже активный номер у работяги
+    active_numbers = get_worker_numbers(user['id'], 'in_progress')
+    if active_numbers:
+        await message.answer(
+            "❌ У вас уже есть активный номер!\n"
+            "Сначала завершите работу с текущим номером."
+        )
+        return
+    
+    # Ищем следующий номер в очереди
+    number = get_next_number()
+    if not number:
+        await message.answer("📭 Очередь пуста. Нет номеров для взятия.")
+        return
+    
+    # Обновляем номер
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE numbers 
+            SET worker_id = ?, status = 'in_progress', started_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (user['id'], number['id']))
+    
+    await state.update_data(number_id=number['id'])
+    await state.set_state(UserStates.worker_select_method)
+    
+    queue_names = {
+        'vip': '⚡ VIP',
+        'regular': '💰 Обычная'
+    }
+    
+    await message.answer(
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"📋 Тип: {queue_names.get(number['queue_type'], number['queue_type'])}\n"
+        f"💵 Цена: {number['price']}$\n\n"
+        "Выберите способ конекта:",
+        reply_markup=get_worker_method_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("method_"), UserStates.worker_select_method)
+async def worker_select_method(callback: CallbackQuery, state: FSMContext):
+    """Выбор метода конекта"""
+    method = callback.data.split("_")[1]
+    
+    if method == "cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Взятие номера отменено.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню",
+            reply_markup=get_main_keyboard(callback.from_user.id)
+        )
+        await callback.answer()
+        return
+    
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+        user = cursor.fetchone()
+    
+    if method == "transfer":
+        # Перенос (Код)
+        await state.update_data(method='transfer')
+        await state.set_state(UserStates.worker_waiting_code)
+        
+        await callback.message.edit_text(
+            f"🔄 Перенос (Код)\n\n"
+            f"📱 Номер: +{number['phone_number']}\n\n"
+            "⏳ Ожидание кода от пользователя...\n"
+            "Пользователь получил запрос на ввод кода."
+        )
+        
+        # Запрашиваем код у пользователя
+        try:
+            await bot.send_message(
+                user['telegram_id'],
+                f"📱 Для номера +{number['phone_number']} требуется код переноса.\n\n"
+                "Пожалуйста, введите код:"
+            )
+        except Exception as e:
+            logger.error(f"Error sending code request to user: {e}")
+        
+        await callback.answer()
+        return
+    
+    elif method == "link":
+        # Связ - ждем фото от работяги
+        await state.update_data(method='link')
+        await state.set_state(UserStates.worker_waiting_photo)
+        
+        await callback.message.edit_text(
+            f"🔗 Связ\n\n"
+            f"📱 Номер: +{number['phone_number']}\n\n"
+            "Отправьте фото для связки:"
+        )
+        await callback.answer()
+        return
+    
+    elif method == "qr":
+        # Кюар - ждем QR от работяги
+        await state.update_data(method='qr')
+        await state.set_state(UserStates.worker_waiting_qr)
+        
+        await callback.message.edit_text(
+            f"📱 Кюар\n\n"
+            f"📱 Номер: +{number['phone_number']}\n\n"
+            "Отправьте QR-код:"
+        )
+        await callback.answer()
         return
 
+# --- Работяга: Перенос (Код) ---
+
+@dp.message(UserStates.worker_waiting_code)
+async def worker_receive_code(message: Message, state: FSMContext):
+    """Получение кода от работяги"""
+    code = message.text.strip()
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    if not code or len(code) < 4:
+        await message.answer("❌ Пожалуйста, введите корректный код.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+    
+    # Отправляем код работяге
+    await message.answer(
+        f"✅ Код получен!\n"
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"🔑 Код: {code}\n\n"
+        "Нажмите 'Встал' после успешного переноса или 'Ошибка':",
+        reply_markup=get_worker_stand_keyboard()
+    )
+    
+    await state.update_data(code=code)
+    await state.set_state(UserStates.worker_confirm_stand)
+
+# --- Работяга: Связ (Фото) ---
+
+@dp.message(UserStates.worker_waiting_photo, F.photo)
+async def worker_receive_photo(message: Message, state: FSMContext):
+    """Получение фото для связки"""
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+        user = cursor.fetchone()
+    
+    # Получаем фото
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_path = f"link_photo_{number_id}_{message.from_user.id}.jpg"
+    await bot.download_file(file.file_path, file_path)
+    
+    # Отправляем фото пользователю
+    try:
+        await bot.send_photo(
+            user['telegram_id'],
+            photo=FSInputFile(file_path),
+            caption=f"📱 Для номера +{number['phone_number']}\n\n"
+                    "Пожалуйста, подтвердите выполнение:",
+            reply_markup=get_user_action_keyboard(number_id)
+        )
+    except Exception as e:
+        logger.error(f"Error sending photo to user: {e}")
+    
+    await message.answer(
+        f"✅ Фото отправлено пользователю!\n"
+        f"📱 Номер: +{number['phone_number']}\n\n"
+        "Ожидайте подтверждения от пользователя..."
+    )
+    
+    await state.set_state(UserStates.worker_confirm_stand)
+
+@dp.message(UserStates.worker_waiting_photo)
+async def worker_photo_invalid(message: Message):
+    """Неверный формат для фото"""
+    await message.answer("❌ Пожалуйста, отправьте фото для связки.")
+
+# --- Работяга: Кюар ---
+
+@dp.message(UserStates.worker_waiting_qr, F.photo)
+async def worker_receive_qr(message: Message, state: FSMContext):
+    """Получение QR-кода"""
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+        user = cursor.fetchone()
+    
+    # Получаем QR
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_path = f"qr_{number_id}_{message.from_user.id}.jpg"
+    await bot.download_file(file.file_path, file_path)
+    
+    # Отправляем QR пользователю
+    try:
+        await bot.send_photo(
+            user['telegram_id'],
+            photo=FSInputFile(file_path),
+            caption=f"📱 Для номера +{number['phone_number']}\n\n"
+                    "Пожалуйста, отсканируйте QR-код и подтвердите выполнение:",
+            reply_markup=get_user_action_keyboard(number_id)
+        )
+    except Exception as e:
+        logger.error(f"Error sending QR to user: {e}")
+    
+    await message.answer(
+        f"✅ QR-код отправлен пользователю!\n"
+        f"📱 Номер: +{number['phone_number']}\n\n"
+        "Ожидайте подтверждения от пользователя..."
+    )
+    
+    await state.set_state(UserStates.worker_confirm_stand)
+
+@dp.message(UserStates.worker_waiting_qr)
+async def worker_qr_invalid(message: Message):
+    """Неверный формат для QR"""
+    await message.answer("❌ Пожалуйста, отправьте QR-код (фото).")
+
+# --- Пользователь: Подтверждение выполнения ---
+
+@dp.callback_query(F.data.startswith("user_done_"))
+async def user_done(callback: CallbackQuery):
+    """Пользователь подтверждает выполнение"""
+    _, number_id = callback.data.split("_")
+    
+    # Уведомляем работягу
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+    
+    if not number:
+        await callback.message.answer("❌ Номер не найден.")
+        await callback.answer()
+        return
+    
+    # Находим работягу
+    worker = get_user_by_id(number['worker_id'])
+    if worker:
+        try:
+            await bot.send_message(
+                worker['telegram_id'],
+                f"✅ Пользователь подтвердил выполнение!\n"
+                f"📱 Номер: +{number['phone_number']}\n\n"
+                "Нажмите 'Встал' если номер успешно встал или 'Ошибка':",
+                reply_markup=get_worker_stand_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Error notifying worker: {e}")
+    
+    await callback.message.edit_text(
+        f"✅ Вы подтвердили выполнение для номера +{number['phone_number']}.\n"
+        "Работяга получил уведомление.",
+        reply_markup=None
+    )
+    await callback.answer()
+
+# --- Работяга: Подтверждение "Встал" ---
+
+@dp.callback_query(F.data == "stand_yes", UserStates.worker_confirm_stand)
+async def worker_stand_yes(callback: CallbackQuery, state: FSMContext):
+    """Работяга подтверждает встал"""
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE numbers 
+            SET started_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+        ''', (number_id,))
+        number = cursor.fetchone()
+    
     await state.clear()
-    await message.reply("❌ Действие отменено.")
+    
+    await callback.message.edit_text(
+        f"✅ Номер встал!\n"
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"🕐 Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+        "Нажмите 'Слет' после завершения работы:",
+        reply_markup=get_worker_fly_keyboard(number_id)
+    )
+    await callback.answer()
 
+@dp.callback_query(F.data == "stand_no", UserStates.worker_confirm_stand)
+async def worker_stand_no(callback: CallbackQuery, state: FSMContext):
+    """Ошибка - номер не встал"""
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    # Возвращаем номер в очередь
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE numbers 
+            SET status = 'waiting', worker_id = NULL, started_at = NULL
+            WHERE id = ?
+        ''', (number_id,))
+    
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ Ошибка! Номер не встал.\n"
+        "Номер возвращен в очередь.",
+        reply_markup=None
+    )
+    await callback.message.answer(
+        "Главное меню",
+        reply_markup=get_worker_keyboard()
+    )
+    await callback.answer()
 
-@dp.message()
-async def unknown_message(message: Message):
-    pass
+# --- Слет номера ---
 
+@dp.callback_query(F.data.startswith("fly_"))
+async def worker_fly(callback: CallbackQuery, state: FSMContext):
+    """Слет номера"""
+    _, number_id = callback.data.split("_")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+        
+        if not number:
+            await callback.message.answer("❌ Номер не найден.")
+            await callback.answer()
+            return
+        
+        # Вычисляем время работы
+        started = datetime.strptime(number['started_at'], '%Y-%m-%d %H:%M:%S')
+        finished = datetime.now()
+        minutes = (finished - started).total_seconds() / 60
+        
+        # Определяем статус
+        if minutes >= 10:
+            status = 'completed'
+            # Начисление зависит от типа очереди
+            if number['queue_type'] == 'vip':
+                # VIP - начисляем сразу
+                add_balance(number['user_id'], number['price'])
+                cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (number_id,))
+                
+                # Уведомляем пользователя
+                try:
+                    await bot.send_message(
+                        number['user_id'],
+                        f"💰 Начислено {number['price']}$ за номер +{number['phone_number']}\n"
+                        f"⏱ Время: {minutes:.1f} минут\n"
+                        f"📋 Тип: ⚡ VIP"
+                    )
+                except Exception as e:
+                    logger.error(f"Error notifying user: {e}")
+        else:
+            status = 'failed'
+        
+        # Обновляем номер
+        cursor.execute('''
+            UPDATE numbers 
+            SET status = ?, finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (status, number_id))
+    
+    # Ответ работяге
+    status_text = "✅ Отстоял" if status == 'completed' else "❌ Слет"
+    price_text = f"💰 Начислено: {number['price']}$" if status == 'completed' else "💰 Начислено: 0$"
+    
+    await callback.message.edit_text(
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"📊 Статус: {status_text}\n"
+        f"⏱ Время: {minutes:.1f} минут\n"
+        f"{price_text}\n\n"
+        f"{'✅ Номер успешно отстоял!' if status == 'completed' else '❌ Номер слетел (< 10 минут)'}",
+        reply_markup=None
+    )
+    
+    # Уведомляем пользователя о слете
+    if status == 'failed':
+        try:
+            await bot.send_message(
+                number['user_id'],
+                f"❌ Номер +{number['phone_number']} слетел\n"
+                f"⏱ Время: {minutes:.1f} минут\n"
+                f"💰 Начислено: 0$ (менее 10 минут)"
+            )
+        except Exception as e:
+            logger.error(f"Error notifying user about fly: {e}")
+    
+    # Возвращаемся в панель работяги
+    await callback.message.answer(
+        "🔧 Панель работяги",
+        reply_markup=get_worker_keyboard()
+    )
+    await callback.answer()
+
+# --- Работяга: Статистика ---
+
+@dp.message(F.text == "📊 Моя статистика")
+async def worker_stats(message: Message):
+    """Статистика работяги"""
+    user = get_user(message.from_user.id)
+    if not user or not user['is_worker']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # За сегодня
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM numbers 
+            WHERE worker_id = ? AND DATE(created_at) = ?
+        ''', (user['id'], today))
+        today_stats = cursor.fetchone()
+        
+        # За всё время
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM numbers 
+            WHERE worker_id = ?
+        ''', (user['id'],))
+        all_stats = cursor.fetchone()
+        
+        # Заработок (только выполненные)
+        cursor.execute('''
+            SELECT COALESCE(SUM(price), 0) as earnings
+            FROM numbers 
+            WHERE worker_id = ? AND status = 'completed'
+        ''', (user['id'],))
+        earnings = cursor.fetchone()
+    
+    today_text = f"За сегодня:\n• Взято: {today_stats['total']}\n• Отстояло: {today_stats['completed']}\n• Слетело: {today_stats['failed']}"
+    all_text = f"За всё время:\n• Взято: {all_stats['total']}\n• Отстояло: {all_stats['completed']}\n• Слетело: {all_stats['failed']}\n• Заработано: {earnings['earnings']}$"
+    
+    await message.answer(
+        f"📊 Моя статистика\n\n{today_text}\n\n{all_text}"
+    )
+
+# --- Запуск бота ---
 
 async def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
+    """Главная функция"""
+    # Инициализация базы данных
+    init_db()
     
-    await dp.start_polling(bot, skip_updates=True)
-
+    # Запуск бота
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
+    asyncio.run(main())
