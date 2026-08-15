@@ -174,7 +174,7 @@ def init_db():
         cursor.execute('''
             INSERT OR IGNORE INTO users (telegram_id, username, is_admin, registered_at)
             VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-        ''', (123456789, 'admin'))
+        ''', (8115654734, 'admin'))
 
 # --- Вспомогательные функции ---
 
