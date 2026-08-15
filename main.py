@@ -6,6 +6,8 @@ import os
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
+import aiohttp
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -26,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"  # Замените на ваш токен
+
+# --- CryptoBot (Crypto Pay API) ---
+# Токен приложения берётся у @CryptoBot -> Crypto Pay -> Create App
+CRYPTO_PAY_TOKEN = "YOUR_CRYPTO_PAY_TOKEN"  # Замените на токен вашего приложения
+CRYPTO_PAY_API_BASE = "https://pay.crypt.bot/api"  # для теста: https://testnet-pay.crypt.bot/api
+CRYPTO_ASSET = "USDT"  # актив, в котором создаются чеки (вывод) и инвойсы (пополнение)
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -150,6 +158,8 @@ def init_db():
         })
         ensure_columns(conn, 'withdrawals', {
             'check_id': 'TEXT',
+            'check_url': 'TEXT',
+            'asset': 'TEXT',
             'status': "TEXT DEFAULT 'pending'",
             'created_at': 'DATETIME DEFAULT CURRENT_TIMESTAMP',
             'expires_at': 'DATETIME',
@@ -175,6 +185,38 @@ def init_db():
             INSERT OR IGNORE INTO users (telegram_id, username, is_admin, registered_at)
             VALUES (?, ?, 1, CURRENT_TIMESTAMP)
         ''', (123456789, 'admin'))
+
+# --- CryptoBot: Crypto Pay API клиент ---
+
+class CryptoPayError(Exception):
+    pass
+
+async def cryptopay_request(method: str, params: dict = None) -> dict:
+    """Низкоуровневый вызов метода Crypto Pay API."""
+    url = f"{CRYPTO_PAY_API_BASE}/{method}"
+    headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=params or {}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            data = await resp.json()
+    if not data.get("ok"):
+        error = data.get("error", {})
+        logger.error(f"CryptoPay API error [{method}]: {error}")
+        raise CryptoPayError(error.get("name") or str(error) or "unknown_error")
+    return data["result"]
+
+async def cryptopay_create_check(amount: float, asset: str = None) -> dict:
+    """Создаёт чек CryptoBot на выплату пользователю (метод createCheck)."""
+    return await cryptopay_request("createCheck", {
+        "asset": asset or CRYPTO_ASSET,
+        "amount": f"{amount:.2f}",
+    })
+
+async def cryptopay_get_checks(check_ids: list = None) -> list:
+    params = {}
+    if check_ids:
+        params["check_ids"] = ",".join(str(c) for c in check_ids)
+    result = await cryptopay_request("getChecks", params)
+    return result.get("items", [])
 
 # --- Вспомогательные функции ---
 
@@ -277,6 +319,16 @@ def add_balance(telegram_id: int, amount: float):
             'UPDATE users SET balance = balance + ? WHERE telegram_id = ?',
             (amount, telegram_id)
         )
+
+def deduct_balance(telegram_id: int, amount: float) -> bool:
+    """Атомарно списывает баланс, только если средств достаточно. Возвращает успех."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET balance = balance - ? WHERE telegram_id = ? AND balance >= ?',
+            (amount, telegram_id, amount)
+        )
+        return cursor.rowcount > 0
 
 def get_user_role(user):
     if not user:
@@ -870,32 +922,49 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    check_id = f"check_{user['telegram_id']}_{int(datetime.now().timestamp())}"
+    # Списываем баланс сразу, атомарно и с проверкой — деньги реально уйдут через CryptoBot
+    if not deduct_balance(user['telegram_id'], amount):
+        await callback.message.answer("❌ Недостаточно средств.")
+        await callback.answer()
+        return
+    
+    try:
+        check = await cryptopay_create_check(amount, CRYPTO_ASSET)
+    except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        # Не удалось создать чек в CryptoBot — возвращаем деньги пользователю
+        add_balance(user['telegram_id'], amount)
+        logger.error(f"Failed to create CryptoBot check for user {user['telegram_id']}: {e}")
+        await callback.message.answer(
+            "❌ Не удалось создать чек на вывод через CryptoBot. Средства не списаны, попробуйте позже."
+        )
+        await callback.answer()
+        return
+    
+    check_id = str(check["check_id"])
+    check_url = check.get("bot_check_url") or f"https://t.me/CryptoBot?start=C-{check.get('hash', '')}"
     expires_at = datetime.now() + timedelta(hours=1)
     
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO withdrawals (user_id, amount, check_id, expires_at, created_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user['id'], amount, check_id, expires_at))
+            INSERT INTO withdrawals (user_id, amount, check_id, check_url, asset, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (user['id'], amount, check_id, check_url, CRYPTO_ASSET, expires_at))
         conn.commit()
         withdrawal_id = cursor.lastrowid
     
     await state.clear()
     
     text = (
-        f"✅ Чек создан!\n\n"
-        f"💰 Сумма: {amount}$\n"
-        f"🆔 ID чека: {check_id}\n"
-        f"⏳ Срок действия: 1 час\n\n"
-        f"🔗 Ссылка для активации: https://t.me/CryptoBot?start={check_id}\n\n"
-        f"⚠️ Чек будет действителен в течение 1 часа."
+        f"✅ Чек CryptoBot создан!\n\n"
+        f"💰 Сумма: {amount} {CRYPTO_ASSET}\n"
+        f"🆔 ID чека: {check_id}\n\n"
+        f"Нажмите кнопку ниже, чтобы получить средства через @CryptoBot."
     )
     
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🔗 Активировать чек", url=f"https://t.me/CryptoBot?start={check_id}"),
+        InlineKeyboardButton(text="🔗 Получить в CryptoBot", url=check_url),
         InlineKeyboardButton(text="✅ Проверить статус", callback_data=f"check_status_{withdrawal_id}")
     )
     builder.row(
@@ -919,19 +988,36 @@ async def check_withdrawal_status(callback: CallbackQuery):
         await callback.answer()
         return
     
+    # Подтягиваем актуальный статус чека напрямую из CryptoBot, если он ещё не финализирован
+    if withdrawal['status'] == 'pending' and withdrawal['check_id']:
+        try:
+            items = await cryptopay_get_checks([withdrawal['check_id']])
+            if items:
+                remote_status = items[0].get("status")  # 'active' | 'activated'
+                if remote_status == "activated":
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE withdrawals SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (withdrawal_id,)
+                        )
+                    withdrawal = dict(withdrawal)
+                    withdrawal['status'] = 'completed'
+        except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Failed to fetch CryptoBot check status: {e}")
+    
     status_names = {
-        'pending': '⏳ Ожидание',
-        'completed': '✅ Выполнено',
+        'pending': '⏳ Ожидание получения',
+        'completed': '✅ Получено',
         'expired': '❌ Истек'
     }
     
     await callback.message.answer(
         f"📊 Статус чека:\n\n"
         f"🆔 ID: {withdrawal['check_id']}\n"
-        f"💰 Сумма: {withdrawal['amount']}$\n"
+        f"💰 Сумма: {withdrawal['amount']} {withdrawal['asset'] or CRYPTO_ASSET}\n"
         f"📊 Статус: {status_names.get(withdrawal['status'], withdrawal['status'])}\n"
-        f"📅 Создан: {withdrawal['created_at']}\n"
-        f"⏳ Истекает: {withdrawal['expires_at']}"
+        f"📅 Создан: {withdrawal['created_at']}"
     )
     await callback.answer()
 
@@ -1970,11 +2056,60 @@ async def worker_stats(message: Message):
     
     await message.answer(f"📊 Моя статистика\n\n{today_text}\n\n{all_text}")
 
+# --- Фоновая проверка чеков на вывод CryptoBot ---
+
+async def cryptopay_checks_watcher():
+    """Раз в 30 секунд опрашивает выданные чеки на вывод и помечает активированные,
+    уведомляя пользователя, когда он забрал средства из CryptoBot."""
+    while True:
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT w.id, w.check_id, w.user_id, w.amount, w.asset
+                    FROM withdrawals w
+                    WHERE w.status = 'pending' AND w.check_id IS NOT NULL
+                ''')
+                pending = cursor.fetchall()
+            
+            if pending:
+                check_ids = [row['check_id'] for row in pending]
+                by_check = {row['check_id']: row for row in pending}
+                items = await cryptopay_get_checks(check_ids)
+                for item in items:
+                    check_id = str(item.get("check_id"))
+                    row = by_check.get(check_id)
+                    if row and item.get("status") == "activated":
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE withdrawals SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'",
+                                (row['id'],)
+                            )
+                            updated = cursor.rowcount > 0
+                        if updated:
+                            owner = get_user_by_id(row['user_id'])
+                            if owner:
+                                try:
+                                    await bot.send_message(
+                                        owner['telegram_id'],
+                                        f"✅ Чек на {row['amount']} {row['asset'] or CRYPTO_ASSET} получен через CryptoBot!"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Error notifying user about check activation: {e}")
+        except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"cryptopay_checks_watcher error: {e}")
+        except Exception as e:
+            logger.error(f"cryptopay_checks_watcher unexpected error: {e}")
+        
+        await asyncio.sleep(30)
+
 # --- Запуск бота ---
 
 async def main():
     init_db()
     logger.info("Starting bot...")
+    asyncio.create_task(cryptopay_checks_watcher())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
