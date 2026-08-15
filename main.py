@@ -877,7 +877,7 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("check_status_"))
 async def check_withdrawal_status(callback: CallbackQuery):
-    _, withdrawal_id = callback.data.split("_")
+    withdrawal_id = callback.data.rsplit("_", 1)[1]
     
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1203,28 +1203,28 @@ async def admin_calculate_payments(message: Message):
             AND n.is_paid = 0
         ''')
         numbers = cursor.fetchall()
-    
-    if not numbers:
-        await message.answer("💥 Нет номеров для оплаты.")
-        return
-    
-    total_amount = 0
-    paid_count = 0
-    
-    for num in numbers:
-        add_balance(num['telegram_id'], num['price'])
-        cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (num['id'],))
-        total_amount += num['price']
-        paid_count += 1
-        
-        try:
-            await bot.send_message(
-                num['telegram_id'],
-                f"💰 Начислено {num['price']}$ за номер +{num['phone_number']}\n"
-                f"Тип: Обычная"
-            )
-        except Exception as e:
-            logger.error(f"Error notifying user {num['telegram_id']}: {e}")
+
+        if not numbers:
+            await message.answer("💥 Нет номеров для оплаты.")
+            return
+
+        total_amount = 0
+        paid_count = 0
+
+        for num in numbers:
+            add_balance(num['telegram_id'], num['price'])
+            cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (num['id'],))
+            total_amount += num['price']
+            paid_count += 1
+
+            try:
+                await bot.send_message(
+                    num['telegram_id'],
+                    f"💰 Начислено {num['price']}$ за номер +{num['phone_number']}\n"
+                    f"Тип: Обычная"
+                )
+            except Exception as e:
+                logger.error(f"Error notifying user {num['telegram_id']}: {e}")
     
     await message.answer(
         f"✅ Расчет оплат завершен!\n"
@@ -1652,7 +1652,7 @@ async def worker_qr_invalid(message: Message):
 
 @dp.callback_query(F.data.startswith("user_done_"))
 async def user_done(callback: CallbackQuery):
-    _, number_id = callback.data.split("_")
+    number_id = callback.data.rsplit("_", 1)[1]
     
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1750,6 +1750,10 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
+        cursor.execute('SELECT * FROM users WHERE id = ?', (number['user_id'],))
+        owner = cursor.fetchone()
+        owner_telegram_id = owner['telegram_id'] if owner else None
+        
         if number['started_at']:
             started = datetime.strptime(number['started_at'], '%Y-%m-%d %H:%M:%S')
             finished = datetime.now()
@@ -1760,18 +1764,20 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
         if minutes >= 10:
             status = 'completed'
             if number['queue_type'] == 'vip':
-                add_balance(number['user_id'], number['price'])
+                if owner_telegram_id is not None:
+                    add_balance(owner_telegram_id, number['price'])
                 cursor.execute('UPDATE numbers SET is_paid = 1 WHERE id = ?', (number_id,))
                 
-                try:
-                    await bot.send_message(
-                        number['user_id'],
-                        f"💰 Начислено {number['price']}$ за номер +{number['phone_number']}\n"
-                        f"⏱ Время: {minutes:.1f} минут\n"
-                        f"📋 Тип: ⚡ VIP"
-                    )
-                except Exception as e:
-                    logger.error(f"Error notifying user: {e}")
+                if owner_telegram_id is not None:
+                    try:
+                        await bot.send_message(
+                            owner_telegram_id,
+                            f"💰 Начислено {number['price']}$ за номер +{number['phone_number']}\n"
+                            f"⏱ Время: {minutes:.1f} минут\n"
+                            f"📋 Тип: ⚡ VIP"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error notifying user: {e}")
         else:
             status = 'failed'
         
@@ -1793,10 +1799,10 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
         reply_markup=None
     )
     
-    if status == 'failed':
+    if status == 'failed' and owner_telegram_id is not None:
         try:
             await bot.send_message(
-                number['user_id'],
+                owner_telegram_id,
                 f"❌ Номер +{number['phone_number']} слетел\n"
                 f"⏱ Время: {minutes:.1f} минут\n"
                 f"💰 Начислено: 0$ (менее 10 минут)"
