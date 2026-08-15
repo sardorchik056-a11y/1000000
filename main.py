@@ -575,7 +575,8 @@ async def select_queue(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     phone = data.get('phone')
     
-    price = float(get_setting('vip_price') if queue_type == 'vip' else 'price'))
+    # ИСПРАВЛЕННАЯ СТРОКА:
+    price = float(get_setting('vip_price') if queue_type == 'vip' else get_setting('price'))
     
     await state.update_data(queue_type=queue_type, price=price)
     await state.set_state(UserStates.confirm_number)
