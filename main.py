@@ -174,7 +174,7 @@ def init_db():
         cursor.execute('''
             INSERT OR IGNORE INTO users (telegram_id, username, is_admin, registered_at)
             VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-        ''', (8115654734, 'admin'))
+        ''', (123456789, 'admin'))
 
 # --- Вспомогательные функции ---
 
@@ -318,6 +318,7 @@ def get_admin_keyboard():
             [KeyboardButton(text="💰 Пополнить казну")],
             [KeyboardButton(text="📨 Рассылка")],
             [KeyboardButton(text="📊 История выводов")],
+            [KeyboardButton(text="📅 Номера за сегодня")],
             [KeyboardButton(text="💥 Расчет оплат")],
             [KeyboardButton(text="📝 Редактировать прайс")],
             [KeyboardButton(text="🖼 Установить фото")],
@@ -501,8 +502,8 @@ async def sell_number(message: Message, state: FSMContext):
     await message.answer(
         "📱 Введите номер телефона.\n\n"
         "Поддерживаемые форматы:\n"
-        "• 10 цифр: 7XXXXXXXXX или 8XXXXXXXXX\n"
-        "• 9 цифр: 9XXXXXXXX → автоматически 7XXXXXXXXX\n"
+        "• 11 цифр: 7XXXXXXXXXX или 8XXXXXXXXXX\n"
+        "• 10 цифр: 9XXXXXXXXX → автоматически 7XXXXXXXXXX\n"
         "• С поддержкой символов: +, пробелы, скобки\n\n"
         "Примеры: +79123456789, 79123456789, 9123456789\n\n"
         "Для отмены отправьте /cancel"
@@ -513,14 +514,12 @@ async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip()
     cleaned = re.sub(r'[+\s()\-]', '', phone)
     
-    if len(cleaned) == 10 and cleaned.startswith('7'):
+    if len(cleaned) == 11 and cleaned.startswith('7'):
         formatted = cleaned
-    elif len(cleaned) == 10 and cleaned.startswith('8'):
+    elif len(cleaned) == 11 and cleaned.startswith('8'):
         formatted = '7' + cleaned[1:]
-    elif len(cleaned) == 9 and cleaned.startswith('9'):
+    elif len(cleaned) == 10 and cleaned.startswith('9'):
         formatted = '7' + cleaned
-    elif len(cleaned) == 11 and cleaned.startswith('7'):
-        formatted = cleaned
     else:
         await message.answer(
             "❌ Неверный формат номера.\n"
@@ -1213,6 +1212,84 @@ async def admin_withdrawals(message: Message):
         )
     
     await message.answer(text)
+
+# --- Админ: Номера за сегодня ---
+
+@dp.message(F.text == "📅 Номера за сегодня")
+async def admin_numbers_today(message: Message):
+    user = get_user(message.from_user.id)
+    if not user or not user['is_admin']:
+        await message.answer("⛔ У вас нет доступа.")
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT n.*, u.username as worker_username
+            FROM numbers n
+            JOIN users u ON n.worker_id = u.id
+            WHERE n.worker_id IS NOT NULL
+              AND DATE(n.started_at) = DATE('now')
+            ORDER BY n.started_at DESC
+        ''')
+        numbers = cursor.fetchall()
+    
+    if not numbers:
+        await message.answer("📅 Сегодня работяги ещё не брали номеров.")
+        return
+    
+    queue_names = {'vip': '⚡ VIP', 'regular': '💰 Обычная'}
+    status_names = {
+        'waiting': '⏳ Ожидает',
+        'in_progress': '🔄 В работе',
+        'completed': '✅ Отстоял',
+        'failed': '❌ Слет'
+    }
+    
+    def hhmm(dt_str):
+        if not dt_str:
+            return None
+        try:
+            return dt_str.split(' ')[1][:5]
+        except (IndexError, AttributeError):
+            return dt_str
+    
+    chunks = [f"📅 Номера за сегодня (взято работягами): {len(numbers)}\n\n"]
+    
+    for num in numbers:
+        time_line = ""
+        if num['started_at']:
+            time_line += f"🟢 Встал: {hhmm(num['started_at'])}"
+        else:
+            time_line += "🟢 Встал: —"
+        
+        if num['finished_at']:
+            time_line += f" | 🏁 Слёт: {hhmm(num['finished_at'])}"
+            try:
+                started = datetime.strptime(num['started_at'], '%Y-%m-%d %H:%M:%S')
+                finished = datetime.strptime(num['finished_at'], '%Y-%m-%d %H:%M:%S')
+                duration = (finished - started).total_seconds() / 60
+                time_line += f" ({duration:.0f} мин)"
+            except (ValueError, TypeError):
+                pass
+        elif num['status'] == 'in_progress':
+            time_line += " | 🔄 ещё в работе"
+        
+        entry = (
+            f"📱 +{num['phone_number']}\n"
+            f"👤 Работяга: @{num['worker_username'] or 'Не указан'}\n"
+            f"📋 {queue_names.get(num['queue_type'], num['queue_type'])} | "
+            f"{status_names.get(num['status'], num['status'])}\n"
+            f"💵 {num['price']}$\n"
+            f"{time_line}\n\n"
+        )
+        if len(chunks[-1]) + len(entry) > 3500:
+            chunks.append(entry)
+        else:
+            chunks[-1] += entry
+    
+    for chunk in chunks:
+        await message.answer(chunk)
 
 # --- Админ: Расчет оплат ---
 
