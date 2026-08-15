@@ -68,6 +68,29 @@ def get_db():
     finally:
         conn.close()
 
+def ensure_columns(conn, table: str, columns: dict):
+    """Добавляет отсутствующие колонки в уже существующую таблицу
+    (нужно, если база была создана более старой версией бота и
+    CREATE TABLE IF NOT EXISTS не тронул её структуру)."""
+    existing = {row[1] for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+    for col_name, col_def in columns.items():
+        if col_name in existing:
+            continue
+        try:
+            if 'CURRENT_TIMESTAMP' in col_def.upper():
+                # SQLite запрещает ALTER TABLE ADD COLUMN с не-константным
+                # DEFAULT (CURRENT_TIMESTAMP), если в таблице уже есть строки.
+                # Поэтому добавляем колонку без DEFAULT, а существующие
+                # строки задним числом заполняем текущим временем.
+                base_type = col_def.upper().split('DEFAULT')[0].strip() or 'DATETIME'
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN {col_name} {base_type}')
+                conn.execute(f'UPDATE {table} SET {col_name} = CURRENT_TIMESTAMP WHERE {col_name} IS NULL')
+            else:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN {col_name} {col_def}')
+            logger.info(f"Migration: added column {col_name} to {table}")
+        except sqlite3.OperationalError as e:
+            logger.error(f"Migration error for {table}.{col_name}: {e}")
+
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
@@ -75,13 +98,7 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER UNIQUE NOT NULL,
-                username TEXT,
-                balance REAL DEFAULT 0,
-                is_admin INTEGER DEFAULT 0,
-                is_worker INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0,
-                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                telegram_id INTEGER UNIQUE NOT NULL
             )
         ''')
         
@@ -92,14 +109,7 @@ def init_db():
                 phone_number TEXT NOT NULL,
                 queue_type TEXT NOT NULL,
                 price REAL NOT NULL,
-                status TEXT DEFAULT 'waiting',
-                worker_id INTEGER,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                started_at DATETIME,
-                finished_at DATETIME,
-                is_paid INTEGER DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES users (id),
-                FOREIGN KEY (worker_id) REFERENCES users (id)
+                FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
         
@@ -108,11 +118,6 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 amount REAL NOT NULL,
-                check_id TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                expires_at DATETIME,
-                completed_at DATETIME,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
@@ -124,6 +129,32 @@ def init_db():
                 value TEXT
             )
         ''')
+        
+        # Миграция: добираем недостающие колонки у уже существующих таблиц
+        # (актуально для баз, созданных старой версией бота)
+        ensure_columns(conn, 'users', {
+            'username': 'TEXT',
+            'balance': 'REAL DEFAULT 0',
+            'is_admin': 'INTEGER DEFAULT 0',
+            'is_worker': 'INTEGER DEFAULT 0',
+            'is_banned': 'INTEGER DEFAULT 0',
+            'registered_at': 'DATETIME DEFAULT CURRENT_TIMESTAMP',
+        })
+        ensure_columns(conn, 'numbers', {
+            'status': "TEXT DEFAULT 'waiting'",
+            'worker_id': 'INTEGER',
+            'created_at': 'DATETIME DEFAULT CURRENT_TIMESTAMP',
+            'started_at': 'DATETIME',
+            'finished_at': 'DATETIME',
+            'is_paid': 'INTEGER DEFAULT 0',
+        })
+        ensure_columns(conn, 'withdrawals', {
+            'check_id': 'TEXT',
+            'status': "TEXT DEFAULT 'pending'",
+            'created_at': 'DATETIME DEFAULT CURRENT_TIMESTAMP',
+            'expires_at': 'DATETIME',
+            'completed_at': 'DATETIME',
+        })
         
         default_settings = [
             ('price', '3.0'),
@@ -141,8 +172,8 @@ def init_db():
         
         # Создаем администратора (замените на свой ID)
         cursor.execute('''
-            INSERT OR IGNORE INTO users (telegram_id, username, is_admin)
-            VALUES (?, ?, 1)
+            INSERT OR IGNORE INTO users (telegram_id, username, is_admin, registered_at)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
         ''', (123456789, 'admin'))
 
 # --- Вспомогательные функции ---
@@ -183,7 +214,7 @@ def get_or_create_user(telegram_id: int, username: str = None):
         
         if not user:
             cursor.execute(
-                'INSERT INTO users (telegram_id, username) VALUES (?, ?)',
+                'INSERT INTO users (telegram_id, username, registered_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
                 (telegram_id, username)
             )
             conn.commit()
@@ -567,8 +598,8 @@ async def confirm_number(callback: CallbackQuery, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO numbers (user_id, phone_number, queue_type, price, status)
-            VALUES (?, ?, ?, ?, 'waiting')
+            INSERT INTO numbers (user_id, phone_number, queue_type, price, status, created_at)
+            VALUES (?, ?, ?, ?, 'waiting', CURRENT_TIMESTAMP)
         ''', (user['id'], phone, queue_type, price))
         conn.commit()
     
@@ -846,8 +877,8 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO withdrawals (user_id, amount, check_id, expires_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO withdrawals (user_id, amount, check_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         ''', (user['id'], amount, check_id, expires_at))
         conn.commit()
         withdrawal_id = cursor.lastrowid
