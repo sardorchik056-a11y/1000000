@@ -30,10 +30,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw"  # Замените на ваш токен
 
 # --- CryptoBot (Crypto Pay API) ---
-# Токен приложения берётся у @CryptoBot -> Crypto Pay -> Create App
 CRYPTO_PAY_TOKEN = "YOUR_CRYPTO_PAY_TOKEN"  # Замените на токен вашего приложения
-CRYPTO_PAY_API_BASE = "https://pay.crypt.bot/api"  # для теста: https://testnet-pay.crypt.bot/api
-CRYPTO_ASSET = "USDT"  # актив, в котором создаются чеки (вывод) и инвойсы (пополнение)
+CRYPTO_PAY_API_BASE = "https://pay.crypt.bot/api"
+CRYPTO_ASSET = "USDT"
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -52,6 +51,8 @@ class UserStates(StatesGroup):
     worker_waiting_photo = State()
     worker_waiting_qr = State()
     worker_confirm_stand = State()
+    worker_after_photo = State()
+    worker_after_qr = State()
     admin_add_worker = State()
     admin_edit_price = State()
     admin_set_photo = State()
@@ -77,19 +78,12 @@ def get_db():
         conn.close()
 
 def ensure_columns(conn, table: str, columns: dict):
-    """Добавляет отсутствующие колонки в уже существующую таблицу
-    (нужно, если база была создана более старой версией бота и
-    CREATE TABLE IF NOT EXISTS не тронул её структуру)."""
     existing = {row[1] for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
     for col_name, col_def in columns.items():
         if col_name in existing:
             continue
         try:
             if 'CURRENT_TIMESTAMP' in col_def.upper():
-                # SQLite запрещает ALTER TABLE ADD COLUMN с не-константным
-                # DEFAULT (CURRENT_TIMESTAMP), если в таблице уже есть строки.
-                # Поэтому добавляем колонку без DEFAULT, а существующие
-                # строки задним числом заполняем текущим временем.
                 base_type = col_def.upper().split('DEFAULT')[0].strip() or 'DATETIME'
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN {col_name} {base_type}')
                 conn.execute(f'UPDATE {table} SET {col_name} = CURRENT_TIMESTAMP WHERE {col_name} IS NULL')
@@ -138,8 +132,22 @@ def init_db():
             )
         ''')
         
-        # Миграция: добираем недостающие колонки у уже существующих таблиц
-        # (актуально для баз, созданных старой версией бота)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS treasury_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL NOT NULL,
+                check_id TEXT,
+                check_url TEXT,
+                asset TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                completed_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+        
         ensure_columns(conn, 'users', {
             'username': 'TEXT',
             'balance': 'REAL DEFAULT 0',
@@ -180,7 +188,6 @@ def init_db():
                 (key, value)
             )
         
-        # Создаем администратора (замените на свой ID)
         cursor.execute('''
             INSERT OR IGNORE INTO users (telegram_id, username, is_admin, registered_at)
             VALUES (?, ?, 1, CURRENT_TIMESTAMP)
@@ -192,7 +199,6 @@ class CryptoPayError(Exception):
     pass
 
 async def cryptopay_request(method: str, params: dict = None) -> dict:
-    """Низкоуровневый вызов метода Crypto Pay API."""
     url = f"{CRYPTO_PAY_API_BASE}/{method}"
     headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
     async with aiohttp.ClientSession() as session:
@@ -205,8 +211,14 @@ async def cryptopay_request(method: str, params: dict = None) -> dict:
     return data["result"]
 
 async def cryptopay_create_check(amount: float, asset: str = None) -> dict:
-    """Создаёт чек CryptoBot на выплату пользователю (метод createCheck)."""
     return await cryptopay_request("createCheck", {
+        "asset": asset or CRYPTO_ASSET,
+        "amount": f"{amount:.2f}",
+    })
+
+async def cryptopay_create_invoice(amount: float, asset: str = None) -> dict:
+    """Создаёт инвойс на пополнение казны"""
+    return await cryptopay_request("createInvoice", {
         "asset": asset or CRYPTO_ASSET,
         "amount": f"{amount:.2f}",
     })
@@ -216,6 +228,13 @@ async def cryptopay_get_checks(check_ids: list = None) -> list:
     if check_ids:
         params["check_ids"] = ",".join(str(c) for c in check_ids)
     result = await cryptopay_request("getChecks", params)
+    return result.get("items", [])
+
+async def cryptopay_get_invoices(invoice_ids: list = None) -> list:
+    params = {}
+    if invoice_ids:
+        params["invoice_ids"] = ",".join(str(c) for c in invoice_ids)
+    result = await cryptopay_request("getInvoices", params)
     return result.get("items", [])
 
 # --- Вспомогательные функции ---
@@ -321,7 +340,6 @@ def add_balance(telegram_id: int, amount: float):
         )
 
 def deduct_balance(telegram_id: int, amount: float) -> bool:
-    """Атомарно списывает баланс, только если средств достаточно. Возвращает успех."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -451,7 +469,23 @@ def get_worker_stand_keyboard():
 def get_worker_fly_keyboard(number_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="💥 Слет", callback_data=f"fly_{number_id}")
+        InlineKeyboardButton(text="💥 Слет", callback_data=f"fly_{number_id}"),
+        InlineKeyboardButton(text="❌ Ошибка", callback_data=f"fly_error_{number_id}")
+    )
+    return builder.as_markup()
+
+def get_worker_cancel_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="worker_cancel")
+    )
+    return builder.as_markup()
+
+def get_worker_waiting_keyboard():
+    """Клавиатура для этапа ожидания подтверждения от пользователя"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="worker_cancel")
     )
     return builder.as_markup()
 
@@ -459,6 +493,23 @@ def get_user_action_keyboard(number_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Сделал", callback_data=f"user_done_{number_id}")
+    )
+    return builder.as_markup()
+
+def get_treasury_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="10$", callback_data="treasury_10"),
+        InlineKeyboardButton(text="25$", callback_data="treasury_25"),
+        InlineKeyboardButton(text="50$", callback_data="treasury_50")
+    )
+    builder.row(
+        InlineKeyboardButton(text="100$", callback_data="treasury_100"),
+        InlineKeyboardButton(text="500$", callback_data="treasury_500"),
+        InlineKeyboardButton(text="1000$", callback_data="treasury_1000")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="treasury_back")
     )
     return builder.as_markup()
 
@@ -922,7 +973,6 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Списываем баланс сразу, атомарно и с проверкой — деньги реально уйдут через CryptoBot
     if not deduct_balance(user['telegram_id'], amount):
         await callback.message.answer("❌ Недостаточно средств.")
         await callback.answer()
@@ -931,7 +981,6 @@ async def process_withdrawal(callback: CallbackQuery, state: FSMContext):
     try:
         check = await cryptopay_create_check(amount, CRYPTO_ASSET)
     except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        # Не удалось создать чек в CryptoBot — возвращаем деньги пользователю
         add_balance(user['telegram_id'], amount)
         logger.error(f"Failed to create CryptoBot check for user {user['telegram_id']}: {e}")
         await callback.message.answer(
@@ -988,12 +1037,11 @@ async def check_withdrawal_status(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Подтягиваем актуальный статус чека напрямую из CryptoBot, если он ещё не финализирован
     if withdrawal['status'] == 'pending' and withdrawal['check_id']:
         try:
             items = await cryptopay_get_checks([withdrawal['check_id']])
             if items:
-                remote_status = items[0].get("status")  # 'active' | 'activated'
+                remote_status = items[0].get("status")
                 if remote_status == "activated":
                     with get_db() as conn:
                         cursor = conn.cursor()
@@ -1173,25 +1221,10 @@ async def admin_treasury(message: Message, state: FSMContext):
     
     treasury = float(get_setting('treasury_balance') or '0')
     
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="10$", callback_data="treasury_10"),
-        InlineKeyboardButton(text="25$", callback_data="treasury_25"),
-        InlineKeyboardButton(text="50$", callback_data="treasury_50")
-    )
-    builder.row(
-        InlineKeyboardButton(text="100$", callback_data="treasury_100"),
-        InlineKeyboardButton(text="500$", callback_data="treasury_500"),
-        InlineKeyboardButton(text="1000$", callback_data="treasury_1000")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="treasury_back")
-    )
-    
     await message.answer(
         f"🏦 Текущий баланс казны: {treasury}$\n\n"
-        "Выберите сумму для пополнения:",
-        reply_markup=builder.as_markup()
+        "Выберите сумму для пополнения через CryptoBot:",
+        reply_markup=get_treasury_keyboard()
     )
 
 @dp.callback_query(F.data.startswith("treasury_"))
@@ -1208,15 +1241,97 @@ async def process_treasury(callback: CallbackQuery):
         return
     
     amount = float(action)
-    treasury = float(get_setting('treasury_balance') or '0')
-    new_treasury = treasury + amount
-    set_setting('treasury_balance', str(new_treasury))
+    user = get_user(callback.from_user.id)
+    
+    if not user:
+        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await callback.answer()
+        return
+    
+    try:
+        invoice = await cryptopay_create_invoice(amount, CRYPTO_ASSET)
+    except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.error(f"Failed to create CryptoBot invoice: {e}")
+        await callback.message.answer(
+            "❌ Не удалось создать инвойс на пополнение через CryptoBot. Попробуйте позже."
+        )
+        await callback.answer()
+        return
+    
+    invoice_id = str(invoice["invoice_id"])
+    invoice_url = invoice.get("bot_invoice_url") or invoice.get("pay_url")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO treasury_transactions (user_id, amount, check_id, check_url, asset, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+        ''', (user['id'], amount, invoice_id, invoice_url, CRYPTO_ASSET))
+        conn.commit()
+        transaction_id = cursor.lastrowid
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💳 Оплатить", url=invoice_url),
+        InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"treasury_check_{transaction_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="treasury_back")
+    )
     
     await callback.message.edit_text(
-        f"✅ Казнa пополнена на {amount}$!\n"
-        f"🏦 Новый баланс: {new_treasury}$",
-        reply_markup=None
+        f"💰 Инвойс на пополнение казны создан!\n\n"
+        f"Сумма: {amount} {CRYPTO_ASSET}\n"
+        f"🆔 ID инвойса: {invoice_id}\n\n"
+        "Нажмите кнопку ниже для оплаты через @CryptoBot.",
+        reply_markup=builder.as_markup()
     )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("treasury_check_"))
+async def check_treasury_payment(callback: CallbackQuery):
+    transaction_id = callback.data.rsplit("_", 1)[1]
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM treasury_transactions WHERE id = ?', (transaction_id,))
+        transaction = cursor.fetchone()
+    
+    if not transaction:
+        await callback.message.answer("❌ Транзакция не найдена.")
+        await callback.answer()
+        return
+    
+    if transaction['status'] == 'completed':
+        await callback.message.answer("✅ Эта транзакция уже была оплачена!")
+        await callback.answer()
+        return
+    
+    try:
+        invoices = await cryptopay_get_invoices([transaction['check_id']])
+        if invoices:
+            invoice = invoices[0]
+            if invoice.get("status") == "paid":
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE treasury_transactions SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (transaction_id,)
+                    )
+                treasury = float(get_setting('treasury_balance') or '0')
+                set_setting('treasury_balance', str(treasury + transaction['amount']))
+                
+                await callback.message.edit_text(
+                    f"✅ Казнa пополнена на {transaction['amount']}$!\n"
+                    f"🏦 Новый баланс: {treasury + transaction['amount']}$",
+                    reply_markup=None
+                )
+                await callback.answer()
+                return
+    except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.error(f"Failed to check treasury payment: {e}")
+    
+    await callback.message.answer("⏳ Оплата пока не подтверждена. Попробуйте позже.")
     await callback.answer()
 
 # --- Админ: Рассылка ---
@@ -1638,11 +1753,22 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
     method = callback.data.split("_")[1]
     
     if method == "cancel":
+        data = await state.get_data()
+        number_id = data.get('number_id')
+        
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE numbers 
+                SET status = 'waiting', worker_id = NULL, started_at = NULL
+                WHERE id = ?
+            ''', (number_id,))
+        
         await state.clear()
-        await callback.message.edit_text("❌ Взятие номера отменено.", reply_markup=None)
+        await callback.message.edit_text("❌ Взятие номера отменено. Номер возвращен в очередь.", reply_markup=None)
         await callback.message.answer(
-            "Главное меню",
-            reply_markup=get_main_keyboard(callback.from_user.id)
+            "🔧 Панель работяги",
+            reply_markup=get_worker_keyboard()
         )
         await callback.answer()
         return
@@ -1670,10 +1796,11 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserStates.worker_waiting_code)
         
         await callback.message.edit_text(
-            f"🔄 Перенос (Код)\n\n"
             f"📱 Номер: +{number['phone_number']}\n\n"
-            "⏳ Ожидание кода от пользователя...\n"
-            "Пользователь получил запрос на ввод кода."
+            f"🔄 Перенос (Код)\n"
+            f"⏳ Ожидание кода от пользователя...\n\n"
+            f"Пользователь получил запрос на ввод кода.",
+            reply_markup=get_worker_cancel_keyboard()
         )
         
         try:
@@ -1693,9 +1820,10 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserStates.worker_waiting_photo)
         
         await callback.message.edit_text(
-            f"🔗 Связ\n\n"
             f"📱 Номер: +{number['phone_number']}\n\n"
-            "Отправьте фото для связки:"
+            f"🔗 Связ\n"
+            f"Отправьте фото для связки:",
+            reply_markup=get_worker_cancel_keyboard()
         )
         await callback.answer()
         return
@@ -1705,9 +1833,10 @@ async def worker_select_method(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserStates.worker_waiting_qr)
         
         await callback.message.edit_text(
-            f"📱 Кюар\n\n"
             f"📱 Номер: +{number['phone_number']}\n\n"
-            "Отправьте QR-код:"
+            f"📱 Кюар\n"
+            f"Отправьте QR-код:",
+            reply_markup=get_worker_cancel_keyboard()
         )
         await callback.answer()
         return
@@ -1783,11 +1912,12 @@ async def worker_receive_photo(message: Message, state: FSMContext):
     
     await message.answer(
         f"✅ Фото отправлено пользователю!\n"
-        f"📱 Номер: +{number['phone_number']}\n\n"
-        "Ожидайте подтверждения от пользователя..."
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"⏳ Ожидание подтверждения...",
+        reply_markup=get_worker_waiting_keyboard()
     )
     
-    await state.set_state(UserStates.worker_confirm_stand)
+    await state.set_state(UserStates.worker_after_photo)
 
 @dp.message(UserStates.worker_waiting_photo)
 async def worker_photo_invalid(message: Message):
@@ -1832,15 +1962,40 @@ async def worker_receive_qr(message: Message, state: FSMContext):
     
     await message.answer(
         f"✅ QR-код отправлен пользователю!\n"
-        f"📱 Номер: +{number['phone_number']}\n\n"
-        "Ожидайте подтверждения от пользователя..."
+        f"📱 Номер: +{number['phone_number']}\n"
+        f"⏳ Ожидание подтверждения...",
+        reply_markup=get_worker_waiting_keyboard()
     )
     
-    await state.set_state(UserStates.worker_confirm_stand)
+    await state.set_state(UserStates.worker_after_qr)
 
 @dp.message(UserStates.worker_waiting_qr)
 async def worker_qr_invalid(message: Message):
     await message.answer("❌ Пожалуйста, отправьте QR-код (фото).")
+
+# --- Worker cancel (универсальная отмена) ---
+
+@dp.callback_query(F.data == "worker_cancel")
+async def worker_cancel(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    number_id = data.get('number_id')
+    
+    if number_id:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE numbers 
+                SET status = 'waiting', worker_id = NULL, started_at = NULL
+                WHERE id = ?
+            ''', (number_id,))
+    
+    await state.clear()
+    await callback.message.edit_text("❌ Действие отменено. Номер возвращен в очередь.", reply_markup=None)
+    await callback.message.answer(
+        "🔧 Панель работяги",
+        reply_markup=get_worker_keyboard()
+    )
+    await callback.answer()
 
 # --- Пользователь: Подтверждение выполнения ---
 
@@ -1923,7 +2078,7 @@ async def worker_stand_no(callback: CallbackQuery, state: FSMContext):
         reply_markup=None
     )
     await callback.message.answer(
-        "Главное меню",
+        "🔧 Панель работяги",
         reply_markup=get_worker_keyboard()
     )
     await callback.answer()
@@ -1932,7 +2087,8 @@ async def worker_stand_no(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("fly_"))
 async def worker_fly(callback: CallbackQuery, state: FSMContext):
-    _, number_id = callback.data.split("_")
+    parts = callback.data.split("_")
+    number_id = parts[1]
     
     with get_db() as conn:
         cursor = conn.cursor()
@@ -2010,6 +2166,38 @@ async def worker_fly(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("fly_error_"))
+async def worker_fly_error(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    number_id = parts[2]
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
+        number = cursor.fetchone()
+        
+        if not number:
+            await callback.message.answer("❌ Номер не найден.")
+            await callback.answer()
+            return
+        
+        cursor.execute('''
+            UPDATE numbers 
+            SET status = 'waiting', worker_id = NULL, started_at = NULL
+            WHERE id = ?
+        ''', (number_id,))
+    
+    await callback.message.edit_text(
+        f"❌ Ошибка при работе с номером +{number['phone_number']}.\n"
+        "Номер возвращен в очередь.",
+        reply_markup=None
+    )
+    await callback.message.answer(
+        "🔧 Панель работяги",
+        reply_markup=get_worker_keyboard()
+    )
+    await callback.answer()
+
 # --- Работяга: Статистика ---
 
 @dp.message(F.text == "📊 Моя статистика")
@@ -2056,11 +2244,9 @@ async def worker_stats(message: Message):
     
     await message.answer(f"📊 Моя статистика\n\n{today_text}\n\n{all_text}")
 
-# --- Фоновая проверка чеков на вывод CryptoBot ---
+# --- Фоновая проверка чеков и инвойсов ---
 
 async def cryptopay_checks_watcher():
-    """Раз в 30 секунд опрашивает выданные чеки на вывод и помечает активированные,
-    уведомляя пользователя, когда он забрал средства из CryptoBot."""
     while True:
         try:
             with get_db() as conn:
@@ -2104,12 +2290,60 @@ async def cryptopay_checks_watcher():
         
         await asyncio.sleep(30)
 
+async def cryptopay_invoice_watcher():
+    while True:
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT t.id, t.check_id, t.user_id, t.amount, t.asset
+                    FROM treasury_transactions t
+                    WHERE t.status = 'pending' AND t.check_id IS NOT NULL
+                ''')
+                pending = cursor.fetchall()
+            
+            if pending:
+                invoice_ids = [row['check_id'] for row in pending]
+                by_invoice = {row['check_id']: row for row in pending}
+                items = await cryptopay_get_invoices(invoice_ids)
+                for item in items:
+                    invoice_id = str(item.get("invoice_id"))
+                    row = by_invoice.get(invoice_id)
+                    if row and item.get("status") == "paid":
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE treasury_transactions SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'",
+                                (row['id'],)
+                            )
+                            updated = cursor.rowcount > 0
+                        if updated:
+                            treasury = float(get_setting('treasury_balance') or '0')
+                            set_setting('treasury_balance', str(treasury + row['amount']))
+                            
+                            owner = get_user_by_id(row['user_id'])
+                            if owner:
+                                try:
+                                    await bot.send_message(
+                                        owner['telegram_id'],
+                                        f"✅ Пополнение казны на {row['amount']} {row['asset'] or CRYPTO_ASSET} подтверждено!"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Error notifying admin about treasury payment: {e}")
+        except (CryptoPayError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"cryptopay_invoice_watcher error: {e}")
+        except Exception as e:
+            logger.error(f"cryptopay_invoice_watcher unexpected error: {e}")
+        
+        await asyncio.sleep(30)
+
 # --- Запуск бота ---
 
 async def main():
     init_db()
     logger.info("Starting bot...")
     asyncio.create_task(cryptopay_checks_watcher())
+    asyncio.create_task(cryptopay_invoice_watcher())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
