@@ -51,11 +51,6 @@ class AdminStates(StatesGroup):
     waiting_code = State()    # ждём, пока админ введёт SMS-код
 
 
-# ================= FSM СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЯ =================
-class UserStates(StatesGroup):
-    waiting_code = State()  # ждём, пока пользователь введёт полученный SMS-код
-
-
 # ================= БАЗА ДАННЫХ =================
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -234,15 +229,6 @@ def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def admin_user_code_kb(req_id: int) -> InlineKeyboardMarkup:
-    # Код прислал сам пользователь — админу остаётся только подтвердить завершение заявки
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Завершить заявку", callback_data=f"usercomplete:{req_id}")],
-        ]
-    )
-
-
 # ================= ТЕКСТ ГЛАВНОГО МЕНЮ =================
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
@@ -255,6 +241,15 @@ def build_menu_text(user_row: sqlite3.Row) -> str:
         f"| 🧾 Всего куплено: {user_row['total_bought']}\n"
         "―――――――――――――――――\n\n"
         "Кнопки :"
+    )
+
+
+def build_waiting_admin_text(req: sqlite3.Row) -> str:
+    return (
+        "✅ <b>Вы отметили: код отправлен!</b>\n"
+        "―――――――――――――――――\n"
+        f"┣ Номер: <code>{req['phone_number']}</code>\n"
+        "┗ ⏳ Ожидайте, администратор вводит код...\n"
     )
 
 
@@ -322,6 +317,53 @@ async def schedule_timeout(bot: Bot, req_id: int) -> None:
 def start_timer(bot: Bot, req_id: int) -> None:
     cancel_timer(req_id)
     active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
+
+
+# ================= ТАЙМЕР ОЖИДАНИЯ ВВОДА КОДА АДМИНОМ =================
+async def schedule_admin_timeout(bot: Bot, req_id: int) -> None:
+    try:
+        await asyncio.sleep(REQUEST_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    req = get_request(req_id)
+    if req is None or req["status"] != "code_pending":
+        return  # админ уже ввёл код / заявка изменилась иначе
+
+    # Админ не успел ввести код вовремя — без штрафа возвращаем заявку пользователю.
+    update_request(req_id, status="issued")
+    req = get_request(req_id)
+
+    if req["user_msg_chat_id"] and req["user_msg_id"]:
+        try:
+            await bot.edit_message_text(
+                chat_id=req["user_msg_chat_id"],
+                message_id=req["user_msg_id"],
+                text=build_issued_text(req),
+                reply_markup=user_issued_kb(req_id),
+                parse_mode="HTML",
+            )
+        except Exception:
+            logging.exception("Не удалось вернуть сообщение пользователя (admin timeout)")
+
+    try:
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"⌛ <b>Заявка #{req_id}:</b> вы не ввели код за 3 минуты.\n"
+            "Заявка возвращена пользователю, ждём повторного нажатия «Код отправлен!».",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logging.exception("Не удалось уведомить админа о таймауте ввода кода")
+
+    # Перезапускаем обычный таймер ожидания нажатия кнопки пользователем.
+    active_timers.pop(req_id, None)
+    active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
+
+
+def start_admin_timer(bot: Bot, req_id: int) -> None:
+    cancel_timer(req_id)
+    active_timers[req_id] = asyncio.create_task(schedule_admin_timeout(bot, req_id))
 
 
 def cancel_timer(req_id: int) -> None:
@@ -572,7 +614,7 @@ async def cb_enter_code(callback: CallbackQuery, state: FSMContext) -> None:
 
     req_id = int(callback.data.split(":")[1])
     req = get_request(req_id)
-    if req is None or req["status"] != "issued":
+    if req is None or req["status"] not in ("issued", "code_pending"):
         await callback.answer("Заявка не в статусе ожидания SMS", show_alert=True)
         return
 
@@ -592,7 +634,7 @@ async def process_code_input(message: Message, state: FSMContext) -> None:
     req_id = data.get("req_id")
     req = get_request(req_id) if req_id else None
 
-    if req is None or req["status"] != "issued":
+    if req is None or req["status"] not in ("issued", "code_pending"):
         await message.answer("Заявка больше не активна.")
         await state.clear()
         return
@@ -617,7 +659,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
     req = get_request(req_id)
 
-    if req is None or req["status"] != "issued" or not req["sms_code"]:
+    if req is None or req["status"] not in ("issued", "code_pending") or not req["sms_code"]:
         await callback.answer("Нечего отправлять", show_alert=True)
         return
 
@@ -659,9 +701,9 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
 
-# ================= ПОЛЬЗОВАТЕЛЬ ОТПРАВЛЯЕТ КОД =================
+# ================= ПОЛЬЗОВАТЕЛЬ НАЖИМАЕТ «КОД ОТПРАВЛЕН!» =================
 @router.callback_query(F.data.startswith("usercodesent:"))
-async def cb_user_code_sent(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
     req = get_request(req_id)
 
@@ -673,90 +715,37 @@ async def cb_user_code_sent(callback: CallbackQuery, state: FSMContext, bot: Bot
         await callback.answer("Это не ваша заявка", show_alert=True)
         return
 
-    # Пользователь успел нажать кнопку вовремя — отменяем штрафной таймер.
-    cancel_timer(req_id)
+    # Пользователь успел нажать кнопку вовремя — отменяем штрафной таймер ожидания нажатия.
     update_request(req_id, status="code_pending")
-
-    await state.set_state(UserStates.waiting_code)
-    await state.update_data(req_id=req_id)
+    req = get_request(req_id)
 
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.edit_text(
+            build_waiting_admin_text(req),
+            reply_markup=None,
+            parse_mode="HTML",
+        )
     except Exception:
-        logging.exception("Не удалось убрать клавиатуру у сообщения пользователя")
-
-    await callback.message.answer("✏️ Отправьте, пожалуйста, полученный код одним сообщением:")
-    await callback.answer()
-
-
-@router.message(StateFilter(UserStates.waiting_code))
-async def process_user_code_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    req_id = data.get("req_id")
-    req = get_request(req_id) if req_id else None
-
-    if req is None or req["status"] != "code_pending" or message.from_user.id != req["user_id"]:
-        await message.answer("Эта заявка больше не активна.")
-        await state.clear()
-        return
-
-    code = message.text.strip()
-    update_request(req_id, sms_code=code, status="code_sent")
-    await state.clear()
-
-    await message.answer("✅ Код получен, ожидайте подтверждения от администратора.")
+        logging.exception("Не удалось отредактировать сообщение пользователя (code sent)")
 
     if ADMIN_CHAT_ID:
         try:
             await bot.send_message(
                 ADMIN_CHAT_ID,
                 (
-                    f"📩 <b>Пользователь прислал код по заявке #{req_id}</b>\n"
+                    f"📩 <b>Пользователь отправил код по заявке #{req_id}</b>\n"
                     f"От: @{req['username'] or req['user_id']}\n"
-                    f"Номер: <code>{req['phone_number']}</code>\n"
-                    f"Код: <code>{code}</code>"
+                    f"Номер: <code>{req['phone_number']}</code>\n\n"
+                    "✍️ Введите код в течение 3 минут, иначе заявка будет возвращена пользователю."
                 ),
-                reply_markup=admin_user_code_kb(req_id),
+                reply_markup=admin_waiting_sms_kb(req_id),
                 parse_mode="HTML",
             )
         except Exception:
-            logging.exception("Не удалось уведомить админа о коде от пользователя")
+            logging.exception("Не удалось уведомить админа о нажатии «Код отправлен!»")
 
-
-@router.callback_query(F.data.startswith("usercomplete:"))
-async def cb_admin_user_complete(callback: CallbackQuery, bot: Bot) -> None:
-    if not is_admin_chat(callback.message.chat.id):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
-
-    if req is None or req["status"] != "code_sent":
-        await callback.answer("Заявка уже обработана", show_alert=True)
-        return
-
-    update_request(req_id, status="completed")
-    increment_total_bought(req["user_id"])
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=(
-                    f"✅ <b>Заявка по номеру {req['phone_number']} завершена!</b>\n"
-                    f"Код <code>{req['sms_code']}</code> подтверждён администратором."
-                ),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение пользователя (usercomplete)")
-
-    await callback.message.edit_text(
-        f"✅ Заявка #{req_id} завершена. Код подтверждён для @{req['username'] or req['user_id']}.",
-        reply_markup=None,
-    )
+    # Запускаем таймер: если админ не введёт код за 3 минуты — заявка вернётся пользователю.
+    start_admin_timer(bot, req_id)
     await callback.answer()
 
 
