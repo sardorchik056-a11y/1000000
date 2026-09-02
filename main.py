@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import sqlite3
+import aiohttp
+import json
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -21,8 +23,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLv
 
 SHOP_NAME = "Kretros SMS Shop"
 SUPPORT_USERNAME = "your_support_username"
-CRYPTOBOT_USERNAME = "cryptobot"  # юзернейм криптобота
-SEND_USERNAME = "send"  # юзернейм send бота
 
 ADMIN_CHAT_ID = 8118184388
 
@@ -30,6 +30,15 @@ REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
 DB_PATH = "shop.db"
 MIN_DEPOSIT = 1  # минимальная сумма пополнения
+
+# ================= НАСТРОЙКИ CRYPTOBOT API =================
+# Получите API ключ здесь: https://t.me/CryptoBot
+CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"  # Замените на ваш токен
+CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
+
+# Валюты для оплаты (можно изменить)
+PAY_CURRENCIES = ["USDT", "BTC", "TON", "ETH", "LTC", "BNB", "TRX"]
+PAY_ASSET = "USDT"  # основная валюта для оплаты
 
 logging.basicConfig(level=logging.INFO)
 
@@ -124,6 +133,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             amount REAL,
+            invoice_id TEXT,
             status TEXT DEFAULT 'pending',
             created_at TEXT,
             completed_at TEXT
@@ -200,16 +210,83 @@ def adjust_balance(user_id: int, delta: float) -> float:
     conn.close()
     return row["balance"] if row else 0.0
 
-def create_deposit(user_id: int, amount: float) -> int:
+def create_deposit(user_id: int, amount: float, invoice_id: str) -> int:
     conn = db_connect()
     cur = conn.execute(
-        "INSERT INTO deposits (user_id, amount, status, created_at) VALUES (?, ?, 'pending', ?)",
-        (user_id, amount, datetime.utcnow().isoformat()),
+        "INSERT INTO deposits (user_id, amount, invoice_id, status, created_at) "
+        "VALUES (?, ?, ?, 'pending', ?)",
+        (user_id, amount, invoice_id, datetime.utcnow().isoformat()),
     )
     conn.commit()
     deposit_id = cur.lastrowid
     conn.close()
     return deposit_id
+
+def update_deposit_status(invoice_id: str, status: str) -> None:
+    conn = db_connect()
+    conn.execute(
+        "UPDATE deposits SET status = ?, completed_at = ? WHERE invoice_id = ?",
+        (status, datetime.utcnow().isoformat(), invoice_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_deposit_by_invoice(invoice_id: str) -> sqlite3.Row | None:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT * FROM deposits WHERE invoice_id = ?", (invoice_id,)
+    ).fetchone()
+    conn.close()
+    return row
+
+# ================= CRYPTOBOT API =================
+class CryptoBotAPI:
+    def __init__(self, token: str):
+        self.token = token
+        self.headers = {
+            "Crypto-Pay-API-Token": token,
+            "Content-Type": "application/json"
+        }
+    
+    async def create_invoice(self, amount: float, asset: str = "USDT", description: str = "Пополнение баланса") -> dict:
+        """Создание счета через CryptoBot API"""
+        url = f"{CRYPTOBOT_API_URL}/createInvoice"
+        payload = {
+            "asset": asset,
+            "amount": str(amount),
+            "description": description,
+            "hidden_message": "Спасибо за пополнение!",
+            "paid_btn_name": "openChannel",
+            "paid_btn_url": "https://t.me/Kretros_sms_bot"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=self.headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("ok"):
+                        return data.get("result")
+                    else:
+                        logging.error(f"CryptoBot API error: {data}")
+                        return None
+                else:
+                    logging.error(f"CryptoBot API HTTP error: {response.status}")
+                    return None
+    
+    async def get_invoice_status(self, invoice_id: str) -> dict:
+        """Проверка статуса счета"""
+        url = f"{CRYPTOBOT_API_URL}/getInvoices"
+        payload = {"invoice_ids": [invoice_id]}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=self.headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("ok") and data.get("result"):
+                        return data["result"]["items"][0] if data["result"]["items"] else None
+                return None
+
+crypto_api = CryptoBotAPI(CRYPTOBOT_API_TOKEN)
 
 # ================= КЛАВИАТУРЫ =================
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -328,13 +405,19 @@ def deposit_amount_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-def deposit_confirm_kb(deposit_id: int) -> InlineKeyboardMarkup:
+def deposit_confirm_kb(deposit_id: int, invoice_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Я оплатил ✅",
-                    callback_data=f"deposit_paid:{deposit_id}",
+                    text="Оплатить 💳",
+                    url=invoice_url
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Проверить оплату ✅",
+                    callback_data=f"deposit_check:{deposit_id}",
                     icon_custom_emoji_id=EMOJI_CHECK_ID
                 )
             ],
@@ -450,15 +533,24 @@ def build_balance_text(user_row: sqlite3.Row) -> str:
         "Пополните баланс для продолжения работы с сервисом."
     )
 
-def build_deposit_text(amount: float) -> str:
+def build_deposit_text(amount: float, invoice: dict, deposit_id: int) -> str:
     return (
         f"{MONEY} <b>Пополнение баланса</b>\n"
         "―――――――――――――――――\n"
-        f"Сумма: {amount:.2f}$\n\n"
-        f"Для оплаты переведите сумму в USDT (TRC-20) на адрес:\n"
-        f"<code>Ваш_кошелек_USDT_здесь</code>\n\n"
-        "После оплаты нажмите кнопку <b>«Я оплатил ✅»</b>\n"
-        "Пожалуйста, не закрывайте это окно до завершения оплаты!"
+        f"Сумма: {amount:.2f} {invoice.get('asset', 'USDT')}\n"
+        f"Счет: #{deposit_id}\n\n"
+        f"Нажмите кнопку <b>«Оплатить 💳»</b> для оплаты\n"
+        "После оплаты нажмите <b>«Проверить оплату ✅»</b>\n\n"
+        f"<b>Статус:</b> ⏳ Ожидание оплаты"
+    )
+
+def build_deposit_success_text(amount: float, new_balance: float) -> str:
+    return (
+        f"{CHECK} <b>Пополнение успешно!</b>\n"
+        "―――――――――――――――――\n"
+        f"Сумма: {amount:.2f}$\n"
+        f"Новый баланс: {new_balance:.2f}$\n\n"
+        "Спасибо за пополнение!"
     )
 
 def build_waiting_admin_text(req: sqlite3.Row) -> str:
@@ -613,9 +705,11 @@ async def cb_back_to_balance(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "back_to_deposit")
 async def cb_back_to_deposit(callback: CallbackQuery) -> None:
-    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
-        build_balance_text(user_row),
+        f"{MONEY} <b>Выберите сумму пополнения</b>\n"
+        "―――――――――――――――――\n"
+        f"Минимальная сумма: {MIN_DEPOSIT}$\n\n"
+        "Выберите сумму или введите вручную:",
         reply_markup=deposit_amount_kb(),
         parse_mode="HTML",
     )
@@ -634,7 +728,6 @@ async def cb_balance(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "deposit")
 async def cb_deposit(callback: CallbackQuery) -> None:
-    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
         f"{MONEY} <b>Выберите сумму пополнения</b>\n"
         "―――――――――――――――――\n"
@@ -650,12 +743,24 @@ async def cb_deposit_amount(callback: CallbackQuery) -> None:
     amount = float(callback.data.split(":")[1])
     user_id = callback.from_user.id
     
-    # Создаем заявку на пополнение
-    deposit_id = create_deposit(user_id, amount)
+    # Создаем счет через CryptoBot API
+    invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
+    
+    if not invoice:
+        await callback.message.edit_text(
+            "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
+            reply_markup=back_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    
+    # Сохраняем депозит в БД
+    deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
     
     await callback.message.edit_text(
-        build_deposit_text(amount),
-        reply_markup=deposit_confirm_kb(deposit_id),
+        build_deposit_text(amount, invoice, deposit_id),
+        reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -686,11 +791,25 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
             return
         
         user_id = message.from_user.id
-        deposit_id = create_deposit(user_id, amount)
+        
+        # Создаем счет через CryptoBot API
+        invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
+        
+        if not invoice:
+            await message.answer(
+                "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
+                reply_markup=back_kb(),
+                parse_mode="HTML",
+            )
+            await state.clear()
+            return
+        
+        # Сохраняем депозит в БД
+        deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
         
         await message.answer(
-            build_deposit_text(amount),
-            reply_markup=deposit_confirm_kb(deposit_id),
+            build_deposit_text(amount, invoice, deposit_id),
+            reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
             parse_mode="HTML",
         )
         await state.clear()
@@ -701,12 +820,12 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
             parse_mode="HTML",
         )
 
-@router.callback_query(F.data.startswith("deposit_paid:"))
-async def cb_deposit_paid(callback: CallbackQuery, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("deposit_check:"))
+async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     deposit_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
     
-    # Получаем информацию о депозите из БД
+    # Получаем информацию о депозите
     conn = db_connect()
     deposit = conn.execute(
         "SELECT * FROM deposits WHERE id = ? AND user_id = ?",
@@ -722,38 +841,39 @@ async def cb_deposit_paid(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
     
-    # Начисляем средства
-    new_balance = adjust_balance(user_id, deposit["amount"])
+    # Проверяем статус счета в CryptoBot
+    invoice_status = await crypto_api.get_invoice_status(deposit["invoice_id"])
     
-    # Обновляем статус депозита
-    conn = db_connect()
-    conn.execute(
-        "UPDATE deposits SET status = 'completed', completed_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), deposit_id)
-    )
-    conn.commit()
-    conn.close()
+    if not invoice_status:
+        await callback.answer("Ошибка проверки статуса. Попробуйте позже.", show_alert=True)
+        return
     
-    await callback.message.edit_text(
-        f"{CHECK} <b>Пополнение успешно!</b>\n"
-        "―――――――――――――――――\n"
-        f"Сумма: {deposit['amount']:.2f}$\n"
-        f"Новый баланс: {new_balance:.2f}$\n\n"
-        "Спасибо за пополнение!",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-    
-    # Уведомление админа
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        f"{MONEY} <b>Пополнение баланса</b>\n"
-        f"Пользователь: @{callback.from_user.username or callback.from_user.id}\n"
-        f"Сумма: {deposit['amount']:.2f}$\n"
-        f"Новый баланс: {new_balance:.2f}$",
-        parse_mode="HTML",
-    )
+    if invoice_status.get("status") == "paid":
+        # Начисляем средства
+        new_balance = adjust_balance(user_id, deposit["amount"])
+        
+        # Обновляем статус депозита
+        update_deposit_status(deposit["invoice_id"], "completed")
+        
+        await callback.message.edit_text(
+            build_deposit_success_text(deposit["amount"], new_balance),
+            reply_markup=back_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer("✅ Оплата подтверждена!")
+        
+        # Уведомление админа
+        user = await bot.get_chat(user_id)
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"{MONEY} <b>Пополнение баланса</b>\n"
+            f"Пользователь: @{user.username or user_id}\n"
+            f"Сумма: {deposit['amount']:.2f}$\n"
+            f"Новый баланс: {new_balance:.2f}$",
+            parse_mode="HTML",
+        )
+    else:
+        await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
 # ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data == "get_number")
@@ -806,9 +926,14 @@ async def cb_support(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         f"{FOLDER} <b>Поддержка</b>\n\n"
         f"По всем вопросам пишите: @{SUPPORT_USERNAME}\n\n"
-        f"Пополнение через:\n"
-        f"• @{SEND_USERNAME}\n"
-        f"• @{CRYPTOBOT_USERNAME}",
+        f"Пополнение через CryptoBot:\n"
+        f"• USDT (TRC-20)\n"
+        f"• BTC\n"
+        f"• TON\n"
+        f"• ETH\n"
+        f"• LTC\n"
+        f"• BNB\n"
+        f"• TRX",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
