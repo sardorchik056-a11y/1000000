@@ -34,8 +34,6 @@ router = Router()
 active_timers: dict[int, asyncio.Task] = {}
 
 # ================= КАСТОМНЫЕ ТЕЛЕГРАМ ПРЕМИУМ ЭМОДЗИ =================
-# Правильный формат: ![ЛЮБОЙ_ЭМОДЗИ](tg://emoji?id=ЧИСЛОВОЙ_ID)
-
 # ID эмодзи из скриншотов
 EMOJI_STAR_ID = "5906581476639513176"
 EMOJI_SMALL_STAR_ID = "5445353829304387411"
@@ -52,27 +50,25 @@ EMOJI_CHECK_ID = "5206607081334906820"
 EMOJI_KEY_ID = "5307843983102204243"
 EMOJI_GLOBE_ID = "5447410659077661506"
 
-# Функция для создания кастомного эмодзи в правильном формате
-def ce(emoji_id: str) -> str:
-    # Используем обычный эмодзи как fallback
-    fallback_emoji = "⭐"  # стандартный fallback
-    return f"![{fallback_emoji}](tg://emoji?id={emoji_id})"
+# Функция для создания кастомного эмодзи в HTML-формате
+def ce(emoji_id: str, fallback: str = "⭐") -> str:
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
 
-# Кастомные эмодзи
-STAR = f"![⭐](tg://emoji?id={EMOJI_STAR_ID})"
-SMALL_STAR = f"![⭐](tg://emoji?id={EMOJI_SMALL_STAR_ID})"
-SMALL_STAR_2 = f"![⭐](tg://emoji?id={EMOJI_SMALL_STAR_2_ID})"
-FOLDER = f"![🗃](tg://emoji?id={EMOJI_FOLDER_ID})"
-PHONE = f"![📞](tg://emoji?id={EMOJI_PHONE_ID})"
-GEAR = f"![⚙️](tg://emoji?id={EMOJI_GEAR_ID})"
-USER = f"![👤](tg://emoji?id={EMOJI_USER_ID})"
-MONEY = f"![💰](tg://emoji?id={EMOJI_MONEY_ID})"
-CROSS = f"![❌](tg://emoji?id={EMOJI_CROSS_ID})"
-WARNING = f"![‼️](tg://emoji?id={EMOJI_WARNING_ID})"
-PHONE_2 = f"![📞](tg://emoji?id={EMOJI_PHONE_2_ID})"
-CHECK = f"![✔️](tg://emoji?id={EMOJI_CHECK_ID})"
-KEY = f"![🔑](tg://emoji?id={EMOJI_KEY_ID})"
-GLOBE = f"![🌐](tg://emoji?id={EMOJI_GLOBE_ID})"
+# Кастомные эмодзи для текста (HTML)
+STAR = ce(EMOJI_STAR_ID, "⭐")
+SMALL_STAR = ce(EMOJI_SMALL_STAR_ID, "⭐")
+SMALL_STAR_2 = ce(EMOJI_SMALL_STAR_2_ID, "⭐")
+FOLDER = ce(EMOJI_FOLDER_ID, "🗃")
+PHONE = ce(EMOJI_PHONE_ID, "📞")
+GEAR = ce(EMOJI_GEAR_ID, "⚙️")
+USER = ce(EMOJI_USER_ID, "👤")
+MONEY = ce(EMOJI_MONEY_ID, "💰")
+CROSS = ce(EMOJI_CROSS_ID, "❌")
+WARNING = ce(EMOJI_WARNING_ID, "‼️")
+PHONE_2 = ce(EMOJI_PHONE_2_ID, "📞")
+CHECK = ce(EMOJI_CHECK_ID, "✔️")
+KEY = ce(EMOJI_KEY_ID, "🔑")
+GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
 
 # ================= FSM СОСТОЯНИЯ АДМИНА =================
 class AdminStates(StatesGroup):
@@ -186,58 +182,131 @@ def adjust_balance(user_id: int, delta: float) -> float:
     conn.close()
     return row["balance"] if row else 0.0
 
-# ================= КЛАВИАТУРЫ =================
+# ================= КЛАВИАТУРЫ С КАСТОМНЫМИ ЭМОДЗИ В КНОПКАХ =================
+# В кнопках используем icon_custom_emoji_id
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{PHONE} Взять номер", callback_data="get_number")],
-            [InlineKeyboardButton(text=f"{MONEY} Баланс", callback_data="balance")],
-            [InlineKeyboardButton(text=f"{GEAR} Правила", callback_data="rules")],
-            [InlineKeyboardButton(text=f"{FOLDER} Поддержка", callback_data="support")],
+            [
+                InlineKeyboardButton(
+                    text="Взять номер",
+                    callback_data="get_number",
+                    icon_custom_emoji_id=EMOJI_PHONE_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Баланс",
+                    callback_data="balance",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Правила",
+                    callback_data="rules",
+                    icon_custom_emoji_id=EMOJI_GEAR_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Поддержка",
+                    callback_data="support",
+                    icon_custom_emoji_id=EMOJI_FOLDER_ID
+                )
+            ],
         ]
     )
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CROSS} Назад", callback_data="back_to_menu")]
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="back_to_menu",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ]
         ]
     )
 
 def user_searching_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CROSS} Отменить", callback_data=f"usercancel:{req_id}")]
+            [
+                InlineKeyboardButton(
+                    text="Отменить",
+                    callback_data=f"usercancel:{req_id}",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ]
         ]
     )
 
 def user_issued_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CHECK} Код отправлен!", callback_data=f"usercodesent:{req_id}")]
+            [
+                InlineKeyboardButton(
+                    text="Код отправлен!",
+                    callback_data=f"usercodesent:{req_id}",
+                    icon_custom_emoji_id=EMOJI_CHECK_ID
+                )
+            ]
         ]
     )
 
 def admin_new_request_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CHECK} Выдать номер", callback_data=f"issue:{req_id}")],
-            [InlineKeyboardButton(text=f"{CROSS} Отклонить", callback_data=f"reject:{req_id}")],
+            [
+                InlineKeyboardButton(
+                    text="Выдать номер",
+                    callback_data=f"issue:{req_id}",
+                    icon_custom_emoji_id=EMOJI_CHECK_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отклонить",
+                    callback_data=f"reject:{req_id}",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ],
         ]
     )
 
 def admin_waiting_sms_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{KEY} Ввести код", callback_data=f"entercode:{req_id}")],
+            [
+                InlineKeyboardButton(
+                    text="Ввести код",
+                    callback_data=f"entercode:{req_id}",
+                    icon_custom_emoji_id=EMOJI_KEY_ID
+                )
+            ]
         ]
     )
 
 def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CHECK} Отправить пользователю", callback_data=f"confirmsend:{req_id}")],
-            [InlineKeyboardButton(text=f"{KEY} Ввести заново", callback_data=f"entercode:{req_id}")],
+            [
+                InlineKeyboardButton(
+                    text="Отправить пользователю",
+                    callback_data=f"confirmsend:{req_id}",
+                    icon_custom_emoji_id=EMOJI_CHECK_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Ввести заново",
+                    callback_data=f"entercode:{req_id}",
+                    icon_custom_emoji_id=EMOJI_KEY_ID
+                )
+            ],
         ]
     )
 
