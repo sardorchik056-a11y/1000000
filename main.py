@@ -33,11 +33,8 @@ MIN_DEPOSIT = 1  # минимальная сумма пополнения
 
 # ================= НАСТРОЙКИ CRYPTOBOT API =================
 # Получите API ключ здесь: https://t.me/CryptoBot
-CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"  # Замените на ваш токен
+CRYPTOBOT_API_TOKEN = "ВАШ_API_ТОКЕН_ОТ_CRYPTOBOT"  # Замените на ваш токен
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
-
-# Валюты для оплаты (можно изменить)
-PAY_CURRENCIES = ["USDT", "BTC", "TON", "ETH", "LTC", "BNB", "TRX"]
 PAY_ASSET = "USDT"  # основная валюта для оплаты
 
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +95,8 @@ def db_connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     conn = db_connect()
+    
+    # Таблица пользователей
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -109,6 +108,8 @@ def init_db() -> None:
         )
         """
     )
+    
+    # Таблица заявок
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS requests (
@@ -127,6 +128,8 @@ def init_db() -> None:
         )
         """
     )
+    
+    # Таблица депозитов с invoice_id
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS deposits (
@@ -140,6 +143,7 @@ def init_db() -> None:
         )
         """
     )
+    
     conn.commit()
     conn.close()
 
@@ -231,10 +235,10 @@ def update_deposit_status(invoice_id: str, status: str) -> None:
     conn.commit()
     conn.close()
 
-def get_deposit_by_invoice(invoice_id: str) -> sqlite3.Row | None:
+def get_deposit_by_id(deposit_id: int) -> sqlite3.Row | None:
     conn = db_connect()
     row = conn.execute(
-        "SELECT * FROM deposits WHERE invoice_id = ?", (invoice_id,)
+        "SELECT * FROM deposits WHERE id = ?", (deposit_id,)
     ).fetchone()
     conn.close()
     return row
@@ -826,15 +830,14 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
     
     # Получаем информацию о депозите
-    conn = db_connect()
-    deposit = conn.execute(
-        "SELECT * FROM deposits WHERE id = ? AND user_id = ?",
-        (deposit_id, user_id)
-    ).fetchone()
-    conn.close()
+    deposit = get_deposit_by_id(deposit_id)
     
     if deposit is None:
         await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    
+    if deposit["user_id"] != user_id:
+        await callback.answer("Это не ваша заявка", show_alert=True)
         return
     
     if deposit["status"] != "pending":
