@@ -17,46 +17,49 @@ from aiogram.types import (
 )
 
 # ================= НАСТРОЙКИ =================
-# Токен лучше не хранить прямо в коде — используйте переменную окружения.
-# Раз токен уже "засветился" в файле/скриншоте, рекомендую перевыпустить его в @BotFather.
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "your_support_username"  # без @
+SUPPORT_USERNAME = "your_support_username"
 
-# Чат, куда будут приходить заявки и где админ управляет выдачей номеров/кодов.
-# Это может быть личный чат админа с ботом (узнать id можно через getUpdates
-# или бота вроде @userinfobot) или отдельная админ-группа.
-ADMIN_CHAT_ID = 8118184388  # <-- обязательно замените на реальный chat_id админа
+ADMIN_CHAT_ID = 8118184388
 
-# Сколько ждать SMS-код после выдачи номера (в секундах)
 REQUEST_TIMEOUT_SECONDS = 3 * 60
-
-# Штраф, если пользователь не нажал "Код отправлен!" вовремя ($)
 PENALTY_AMOUNT = 0.5
-
 DB_PATH = "shop.db"
 
 logging.basicConfig(level=logging.INFO)
 
 router = Router()
-
-# request_id -> asyncio.Task с таймером ожидания SMS
 active_timers: dict[int, asyncio.Task] = {}
 
+# ================= КАСТОМНЫЕ ЭМОДЗИ =================
+# Эмодзи из скриншотов
+EMOJI_STAR = "⭐"  # 5906581476639513176
+EMOJI_SMALL_STAR = "⭐"  # 5445353829304387411
+EMOJI_SMALL_STAR_2 = "⭐"  # 6078158956188930337
+EMOJI_FOLDER = "🗃"  # 5877316724830768997
+EMOJI_PHONE = "📞"  # 5897567714674741148
+EMOJI_GEAR = "⚙️"  # 5341715473882955310
+EMOJI_USER = "👤"  # 5848400681416793625
+EMOJI_CROSS = "❌"  # 5210952531676504517
+EMOJI_WARNING = "‼️"  # 5440660757194744323
+EMOJI_PHONE_2 = "📞"  # 5104966345267610825
+EMOJI_MONEY = "💰"  # 5116648080787112958
+EMOJI_CHECK = "✔️"  # 5206607081334906820
+EMOJI_KEY = "🔑"  # 5307843983102204243
+EMOJI_GLOBE = "🌐"  # 5447410659077661506
 
 # ================= FSM СОСТОЯНИЯ АДМИНА =================
 class AdminStates(StatesGroup):
-    waiting_number = State()  # ждём, пока админ введёт номер телефона
-    waiting_code = State()    # ждём, пока админ введёт SMS-код
-
+    waiting_number = State()
+    waiting_code = State()
 
 # ================= БАЗА ДАННЫХ =================
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_db() -> None:
     conn = db_connect()
@@ -92,7 +95,6 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-
 def get_or_create_user(user_id: int, username: str | None) -> sqlite3.Row:
     conn = db_connect()
     row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -113,7 +115,6 @@ def get_or_create_user(user_id: int, username: str | None) -> sqlite3.Row:
     conn.close()
     return row
 
-
 def create_request(user_id: int, username: str | None) -> int:
     conn = db_connect()
     cur = conn.execute(
@@ -125,13 +126,11 @@ def create_request(user_id: int, username: str | None) -> int:
     conn.close()
     return req_id
 
-
 def get_request(req_id: int) -> sqlite3.Row | None:
     conn = db_connect()
     row = conn.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
     conn.close()
     return row
-
 
 def update_request(req_id: int, **fields) -> None:
     if not fields:
@@ -143,7 +142,6 @@ def update_request(req_id: int, **fields) -> None:
     conn.commit()
     conn.close()
 
-
 def increment_total_bought(user_id: int) -> None:
     conn = db_connect()
     conn.execute(
@@ -152,9 +150,7 @@ def increment_total_bought(user_id: int) -> None:
     conn.commit()
     conn.close()
 
-
 def adjust_balance(user_id: int, delta: float) -> float:
-    """Изменяет баланс пользователя на delta (может быть отрицательным) и возвращает новый баланс."""
     conn = db_connect()
     conn.execute(
         "UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id)
@@ -166,105 +162,94 @@ def adjust_balance(user_id: int, delta: float) -> float:
     conn.close()
     return row["balance"] if row else 0.0
 
-
 # ================= КЛАВИАТУРЫ =================
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Взять номер", callback_data="get_number")],
-            [InlineKeyboardButton(text="💳 Баланс", callback_data="balance")],
-            [InlineKeyboardButton(text="⚙️ Правила", callback_data="rules")],
-            [InlineKeyboardButton(text="🛎 Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text=f"{EMOJI_PHONE} Взять номер", callback_data="get_number")],
+            [InlineKeyboardButton(text=f"{EMOJI_MONEY} Баланс", callback_data="balance")],
+            [InlineKeyboardButton(text=f"{EMOJI_GEAR} Правила", callback_data="rules")],
+            [InlineKeyboardButton(text=f"{EMOJI_FOLDER} Поддержка", callback_data="support")],
         ]
     )
-
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text=f"{EMOJI_CROSS} Назад", callback_data="back_to_menu")]
         ]
     )
-
 
 def user_searching_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"usercancel:{req_id}")]
+            [InlineKeyboardButton(text=f"{EMOJI_CROSS} Отменить", callback_data=f"usercancel:{req_id}")]
         ]
     )
-
 
 def user_issued_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Код отправлен!", callback_data=f"usercodesent:{req_id}")]
+            [InlineKeyboardButton(text=f"{EMOJI_CHECK} Код отправлен!", callback_data=f"usercodesent:{req_id}")]
         ]
     )
-
 
 def admin_new_request_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Выдать номер", callback_data=f"issue:{req_id}")],
-            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{req_id}")],
+            [InlineKeyboardButton(text=f"{EMOJI_CHECK} Выдать номер", callback_data=f"issue:{req_id}")],
+            [InlineKeyboardButton(text=f"{EMOJI_CROSS} Отклонить", callback_data=f"reject:{req_id}")],
         ]
     )
-
 
 def admin_waiting_sms_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✍️ Ввести код", callback_data=f"entercode:{req_id}")],
+            [InlineKeyboardButton(text=f"{EMOJI_KEY} Ввести код", callback_data=f"entercode:{req_id}")],
         ]
     )
-
 
 def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отправить пользователю", callback_data=f"confirmsend:{req_id}")],
-            [InlineKeyboardButton(text="✏️ Ввести заново", callback_data=f"entercode:{req_id}")],
+            [InlineKeyboardButton(text=f"{EMOJI_CHECK} Отправить пользователю", callback_data=f"confirmsend:{req_id}")],
+            [InlineKeyboardButton(text=f"{EMOJI_KEY} Ввести заново", callback_data=f"entercode:{req_id}")],
         ]
     )
-
 
 # ================= ТЕКСТ ГЛАВНОГО МЕНЮ =================
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
     return (
-        f"<b>{SHOP_NAME}</b>\n"
+        f"{EMOJI_STAR}{EMOJI_SMALL_STAR}{EMOJI_SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
         "―――――――――――――――――\n"
-        f"| 👤 User: @{username} !\n"
-        f"| 🆔 ID: <code>{user_row['user_id']}</code>\n"
-        f"| 💰 Баланс: {user_row['balance']:.0f}$\n"
-        f"| 🧾 Всего куплено: {user_row['total_bought']}\n"
+        f"{EMOJI_USER} User: @{username} !\n"
+        f"{EMOJI_FOLDER} ID: <code>{user_row['user_id']}</code>\n"
+        f"{EMOJI_MONEY} Баланс: {user_row['balance']:.0f}$\n"
+        f"{EMOJI_FOLDER} Всего куплено: {user_row['total_bought']}\n"
         "―――――――――――――――――\n\n"
         "Кнопки :"
     )
 
-
 def build_waiting_admin_text(req: sqlite3.Row) -> str:
     return (
-        "✅ <b>Вы отметили: код отправлен!</b>\n"
+        f"{EMOJI_CHECK} <b>Вы отметили: код отправлен!</b>\n"
         "―――――――――――――――――\n"
         f"┣ Номер: <code>{req['phone_number']}</code>\n"
         "┗ ⏳ Ожидайте, администратор вводит код...\n"
     )
 
-
 def build_issued_text(req: sqlite3.Row) -> str:
     return (
-        "✅ <b>Номер получен!</b>\n"
+        f"{EMOJI_CHECK} <b>Номер получен!</b>\n"
         "―――――――――――――――――\n"
         f"┣ Номер: <code>{req['phone_number']}</code>\n"
         "┣ Формат: СМС\n"
-        "┗ 💲 Остаток: 0.0000$\n\n"
+        f"┗ {EMOJI_MONEY} Остаток: 0.0000$\n\n"
         "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
     )
 
-
-# ================= ТАЙМЕР ОЖИДАНИЯ SMS =================
+# ================= ТАЙМЕРЫ =================
 async def schedule_timeout(bot: Bot, req_id: int) -> None:
     try:
         await asyncio.sleep(REQUEST_TIMEOUT_SECONDS)
@@ -273,9 +258,8 @@ async def schedule_timeout(bot: Bot, req_id: int) -> None:
 
     req = get_request(req_id)
     if req is None or req["status"] != "issued":
-        return  # пользователь уже нажал "Код отправлен!", заявка отменена/отклонена и т.п.
+        return
 
-    # Пользователь не нажал кнопку "Код отправлен!" за отведённое время — штрафуем.
     update_request(req_id, status="expired")
     new_balance = adjust_balance(req["user_id"], -PENALTY_AMOUNT)
 
@@ -285,10 +269,10 @@ async def schedule_timeout(bot: Bot, req_id: int) -> None:
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
                 text=(
-                    "❗ <b>СМС не пришло</b> ❗\n\n"
-                    "🟢 Номер был возвращён в сток\n\n"
-                    f"🌐 Штраф: {PENALTY_AMOUNT}$\n"
-                    f"💳 Ваш баланс: {new_balance:.2f}$"
+                    f"{EMOJI_WARNING} <b>СМС не пришло</b> {EMOJI_WARNING}\n\n"
+                    f"{EMOJI_PHONE_2} Номер был возвращён в сток\n\n"
+                    f"{EMOJI_GLOBE} Штраф: {PENALTY_AMOUNT}$\n"
+                    f"{EMOJI_MONEY} Ваш баланс: {new_balance:.2f}$"
                 ),
                 parse_mode="HTML",
             )
@@ -313,13 +297,10 @@ async def schedule_timeout(bot: Bot, req_id: int) -> None:
 
     active_timers.pop(req_id, None)
 
-
 def start_timer(bot: Bot, req_id: int) -> None:
     cancel_timer(req_id)
     active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
 
-
-# ================= ТАЙМЕР ОЖИДАНИЯ ВВОДА КОДА АДМИНОМ =================
 async def schedule_admin_timeout(bot: Bot, req_id: int) -> None:
     try:
         await asyncio.sleep(REQUEST_TIMEOUT_SECONDS)
@@ -328,9 +309,8 @@ async def schedule_admin_timeout(bot: Bot, req_id: int) -> None:
 
     req = get_request(req_id)
     if req is None or req["status"] != "code_pending":
-        return  # админ уже ввёл код / заявка изменилась иначе
+        return
 
-    # Админ не успел ввести код вовремя — без штрафа возвращаем заявку пользователю.
     update_request(req_id, status="issued")
     req = get_request(req_id)
 
@@ -356,25 +336,20 @@ async def schedule_admin_timeout(bot: Bot, req_id: int) -> None:
     except Exception:
         logging.exception("Не удалось уведомить админа о таймауте ввода кода")
 
-    # Перезапускаем обычный таймер ожидания нажатия кнопки пользователем.
     active_timers.pop(req_id, None)
     active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
-
 
 def start_admin_timer(bot: Bot, req_id: int) -> None:
     cancel_timer(req_id)
     active_timers[req_id] = asyncio.create_task(schedule_admin_timeout(bot, req_id))
-
 
 def cancel_timer(req_id: int) -> None:
     task = active_timers.pop(req_id, None)
     if task and not task.done():
         task.cancel()
 
-
 def is_admin_chat(chat_id: int) -> bool:
     return chat_id == ADMIN_CHAT_ID
-
 
 # ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
 @router.message(CommandStart())
@@ -386,7 +361,6 @@ async def cmd_start(message: Message) -> None:
         parse_mode="HTML",
     )
 
-
 @router.callback_query(F.data == "back_to_menu")
 async def cb_back_to_menu(callback: CallbackQuery) -> None:
     user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
@@ -397,14 +371,13 @@ async def cb_back_to_menu(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-
 @router.callback_query(F.data == "get_number")
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user = callback.from_user
     req_id = create_request(user.id, user.username)
 
     await callback.message.edit_text(
-        "🔍 <b>В поиске номера</b>, ожидайте в течение 3 минут",
+        f"{EMOJI_PHONE_2} <b>В поиске номера</b>, ожидайте в течение 3 минут",
         reply_markup=user_searching_kb(req_id),
         parse_mode="HTML",
     )
@@ -431,7 +404,6 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("usercancel:"))
 async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
@@ -448,7 +420,7 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     update_request(req_id, status="cancelled")
 
     await callback.message.edit_text(
-        "❌ Заявка отменена.", reply_markup=None
+        f"{EMOJI_CROSS} Заявка отменена.", reply_markup=None
     )
 
     if req["admin_msg_chat_id"] and req["admin_msg_id"]:
@@ -456,30 +428,28 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
             await bot.edit_message_text(
                 chat_id=req["admin_msg_chat_id"],
                 message_id=req["admin_msg_id"],
-                text=f"❌ Заявка #{req_id} отменена пользователем @{req['username'] or req['user_id']}.",
+                text=f"{EMOJI_CROSS} Заявка #{req_id} отменена пользователем @{req['username'] or req['user_id']}.",
             )
         except Exception:
             logging.exception("Не удалось отредактировать сообщение админа (user cancel)")
 
     await callback.answer()
 
-
 @router.callback_query(F.data == "balance")
 async def cb_balance(callback: CallbackQuery) -> None:
     user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
-        f"💳 <b>Ваш баланс:</b> {user_row['balance']:.0f}$\n\n"
+        f"{EMOJI_MONEY} <b>Ваш баланс:</b> {user_row['balance']:.0f}$\n\n"
         "Пополнение доступно через раздел поддержки.",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
     await callback.answer()
 
-
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        "⚙️ <b>Правила пользования сервисом</b>\n\n"
+        f"{EMOJI_GEAR} <b>Правила пользования сервисом</b>\n\n"
         "1. Номер выдаётся на ограниченное время.\n"
         "2. Средства не возвращаются после успешной активации.\n"
         "3. Запрещена перепродажа номеров третьим лицам.",
@@ -488,16 +458,14 @@ async def cb_rules(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-
 @router.callback_query(F.data == "support")
 async def cb_support(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        f"🛎 <b>Поддержка</b>\n\nПо всем вопросам пишите: @{SUPPORT_USERNAME}",
+        f"{EMOJI_FOLDER} <b>Поддержка</b>\n\nПо всем вопросам пишите: @{SUPPORT_USERNAME}",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
     await callback.answer()
-
 
 # ================= АДМИНСКИЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data.startswith("issue:"))
@@ -516,10 +484,9 @@ async def cb_issue_number(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(req_id=req_id)
 
     await callback.message.answer(
-        f"✍️ Введите номер телефона для заявки #{req_id} (например, +79991112233):"
+        f"{EMOJI_KEY} Введите номер телефона для заявки #{req_id} (например, +79991112233):"
     )
     await callback.answer()
-
 
 @router.callback_query(F.data.startswith("reject:"))
 async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
@@ -536,7 +503,7 @@ async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
     update_request(req_id, status="rejected")
 
     await callback.message.edit_text(
-        f"❌ Заявка #{req_id} отклонена.", reply_markup=None
+        f"{EMOJI_CROSS} Заявка #{req_id} отклонена.", reply_markup=None
     )
 
     if req["user_msg_chat_id"] and req["user_msg_id"]:
@@ -544,13 +511,12 @@ async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
             await bot.edit_message_text(
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
-                text="❌ Ваша заявка отклонена администратором.",
+                text=f"{EMOJI_CROSS} Ваша заявка отклонена администратором.",
             )
         except Exception:
             logging.exception("Не удалось отредактировать сообщение пользователя (reject)")
 
     await callback.answer()
-
 
 @router.message(StateFilter(AdminStates.waiting_number), F.chat.id == ADMIN_CHAT_ID)
 async def process_number_input(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -585,7 +551,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             logging.exception("Не удалось отредактировать сообщение пользователя (issue)")
 
     await message.answer(
-        f"✅ Номер <code>{phone_number}</code> выдан @{req['username'] or req['user_id']}. "
+        f"{EMOJI_CHECK} Номер <code>{phone_number}</code> выдан @{req['username'] or req['user_id']}. "
         "Жду СМС на свой телефон.\n⏳ Таймер: 3 минуты.",
         reply_markup=admin_waiting_sms_kb(req_id),
         parse_mode="HTML",
@@ -596,7 +562,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             await bot.edit_message_text(
                 chat_id=req["admin_msg_chat_id"],
                 message_id=req["admin_msg_id"],
-                text=f"✅ Заявка #{req_id}: номер <code>{phone_number}</code> выдан.",
+                text=f"{EMOJI_CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> выдан.",
                 parse_mode="HTML",
             )
         except Exception:
@@ -604,7 +570,6 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
 
     start_timer(bot, req_id)
     await state.clear()
-
 
 @router.callback_query(F.data.startswith("entercode:"))
 async def cb_enter_code(callback: CallbackQuery, state: FSMContext) -> None:
@@ -622,11 +587,10 @@ async def cb_enter_code(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(req_id=req_id)
 
     await callback.message.answer(
-        f"✍️ Введите СМС-код для номера <code>{req['phone_number']}</code>:",
+        f"{EMOJI_KEY} Введите СМС-код для номера <code>{req['phone_number']}</code>:",
         parse_mode="HTML",
     )
     await callback.answer()
-
 
 @router.message(StateFilter(AdminStates.waiting_code), F.chat.id == ADMIN_CHAT_ID)
 async def process_code_input(message: Message, state: FSMContext) -> None:
@@ -649,7 +613,6 @@ async def process_code_input(message: Message, state: FSMContext) -> None:
     )
     await state.clear()
 
-
 @router.callback_query(F.data.startswith("confirmsend:"))
 async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin_chat(callback.message.chat.id):
@@ -670,7 +633,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await bot.send_message(
             req["user_id"],
-            f"📩 <b>Код для номера {req['phone_number']}:</b>\n<code>{req['sms_code']}</code>",
+            f"{EMOJI_KEY} <b>Код для номера {req['phone_number']}:</b>\n<code>{req['sms_code']}</code>",
             parse_mode="HTML",
         )
         sent_ok = True
@@ -684,7 +647,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
                 text=(
-                    f"✅ <b>Номер {req['phone_number']}</b>\n"
+                    f"{EMOJI_CHECK} <b>Номер {req['phone_number']}</b>\n"
                     f"Код отправлен: <code>{req['sms_code']}</code>"
                 ),
                 parse_mode="HTML",
@@ -694,12 +657,11 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
 
     status_note = "отправлен" if sent_ok else "НЕ отправлен (ошибка, см. логи)"
     await callback.message.edit_text(
-        f"✅ Заявка #{req_id} завершена. Код {status_note} пользователю "
+        f"{EMOJI_CHECK} Заявка #{req_id} завершена. Код {status_note} пользователю "
         f"@{req['username'] or req['user_id']}.",
         reply_markup=None,
     )
     await callback.answer()
-
 
 # ================= ПОЛЬЗОВАТЕЛЬ НАЖИМАЕТ «КОД ОТПРАВЛЕН!» =================
 @router.callback_query(F.data.startswith("usercodesent:"))
@@ -715,7 +677,6 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Это не ваша заявка", show_alert=True)
         return
 
-    # Пользователь успел нажать кнопку вовремя — отменяем штрафной таймер ожидания нажатия.
     update_request(req_id, status="code_pending")
     req = get_request(req_id)
 
@@ -733,7 +694,7 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
             await bot.send_message(
                 ADMIN_CHAT_ID,
                 (
-                    f"📩 <b>Пользователь отправил код по заявке #{req_id}</b>\n"
+                    f"{EMOJI_KEY} <b>Пользователь отправил код по заявке #{req_id}</b>\n"
                     f"От: @{req['username'] or req['user_id']}\n"
                     f"Номер: <code>{req['phone_number']}</code>\n\n"
                     "✍️ Введите код в течение 3 минут, иначе заявка будет возвращена пользователю."
@@ -744,10 +705,8 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
         except Exception:
             logging.exception("Не удалось уведомить админа о нажатии «Код отправлен!»")
 
-    # Запускаем таймер: если админ не введёт код за 3 минуты — заявка вернётся пользователю.
     start_admin_timer(bot, req_id)
     await callback.answer()
-
 
 # ================= ЗАПУСК =================
 async def main() -> None:
@@ -757,7 +716,6 @@ async def main() -> None:
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
