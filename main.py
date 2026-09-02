@@ -35,41 +35,41 @@ active_timers: dict[int, asyncio.Task] = {}
 
 # ================= КАСТОМНЫЕ ТЕЛЕГРАМ ПРЕМИУМ ЭМОДЗИ =================
 # ID эмодзи из скриншотов
-EMOJI_STAR = "⭐"  # 5906581476639513176
-EMOJI_SMALL_STAR = "⭐"  # 5445353829304387411
-EMOJI_SMALL_STAR_2 = "⭐"  # 6078158956188930337
-EMOJI_FOLDER = "🗃"  # 5877316724830768997
-EMOJI_PHONE = "📞"  # 5897567714674741148
-EMOJI_GEAR = "⚙️"  # 5341715473882955310
-EMOJI_USER = "👤"  # 5848400681416793625
-EMOJI_CROSS = "❌"  # 5210952531676504517
-EMOJI_WARNING = "‼️"  # 5440660757194744323
-EMOJI_PHONE_2 = "📞"  # 5104966345267610825
-EMOJI_MONEY = "💰"  # 5116648080787112958
-EMOJI_CHECK = "✔️"  # 5206607081334906820
-EMOJI_KEY = "🔑"  # 5307843983102204243
-EMOJI_GLOBE = "🌐"  # 5447410659077661506
+EMOJI_STAR_ID = "5906581476639513176"
+EMOJI_SMALL_STAR_ID = "5445353829304387411"
+EMOJI_SMALL_STAR_2_ID = "6078158956188930337"
+EMOJI_FOLDER_ID = "5877316724830768997"
+EMOJI_PHONE_ID = "5897567714674741148"
+EMOJI_GEAR_ID = "5341715473882955310"
+EMOJI_USER_ID = "5848400681416793625"
+EMOJI_MONEY_ID = "5116648080787112958"
 
-# ================= ФУНКЦИИ ДЛЯ РАБОТЫ С КАСТОМНЫМИ ЭМОДЗИ =================
+# Функция для создания кастомного эмодзи
 def custom_emoji(emoji_id: str) -> str:
-    """Возвращает кастомный эмодзи по его ID"""
     return f"![{emoji_id}](tg://emoji?id={emoji_id})"
 
-# Создаем кастомные эмодзи
-CUSTOM_STAR = custom_emoji("5906581476639513176")
-CUSTOM_SMALL_STAR = custom_emoji("5445353829304387411")
-CUSTOM_SMALL_STAR_2 = custom_emoji("6078158956188930337")
-CUSTOM_FOLDER = custom_emoji("5877316724830768997")
-CUSTOM_PHONE = custom_emoji("5897567714674741148")
-CUSTOM_GEAR = custom_emoji("5341715473882955310")
-CUSTOM_USER = custom_emoji("5848400681416793625")
-CUSTOM_CROSS = custom_emoji("5210952531676504517")
-CUSTOM_WARNING = custom_emoji("5440660757194744323")
-CUSTOM_PHONE_2 = custom_emoji("5104966345267610825")
-CUSTOM_MONEY = custom_emoji("5116648080787112958")
-CUSTOM_CHECK = custom_emoji("5206607081334906820")
-CUSTOM_KEY = custom_emoji("5307843983102204243")
-CUSTOM_GLOBE = custom_emoji("5447410659077661506")
+# Кастомные эмодзи для текста
+STAR = custom_emoji(EMOJI_STAR_ID)
+SMALL_STAR = custom_emoji(EMOJI_SMALL_STAR_ID)
+SMALL_STAR_2 = custom_emoji(EMOJI_SMALL_STAR_2_ID)
+FOLDER = custom_emoji(EMOJI_FOLDER_ID)
+USER = custom_emoji(EMOJI_USER_ID)
+MONEY = custom_emoji(EMOJI_MONEY_ID)
+
+# Кастомные эмодзи для кнопок (используем только ID, без маркдауна)
+BUTTON_PHONE = f"![{EMOJI_PHONE_ID}](tg://emoji?id={EMOJI_PHONE_ID})"
+BUTTON_MONEY = f"![{EMOJI_MONEY_ID}](tg://emoji?id={EMOJI_MONEY_ID})"
+BUTTON_GEAR = f"![{EMOJI_GEAR_ID}](tg://emoji?id={EMOJI_GEAR_ID})"
+BUTTON_FOLDER = f"![{EMOJI_FOLDER_ID}](tg://emoji?id={EMOJI_FOLDER_ID})"
+BUTTON_CROSS = f"![5210952531676504517](tg://emoji?id=5210952531676504517)"
+BUTTON_CHECK = f"![5206607081334906820](tg://emoji?id=5206607081334906820)"
+BUTTON_KEY = f"![5307843983102204243](tg://emoji?id=5307843983102204243)"
+
+# Другие эмодзи
+PHONE = f"![{EMOJI_PHONE_ID}](tg://emoji?id={EMOJI_PHONE_ID})"
+WARNING = f"![5440660757194744323](tg://emoji?id=5440660757194744323)"
+PHONE_2 = f"![5104966345267610825](tg://emoji?id=5104966345267610825)"
+GLOBE = f"![5447410659077661506](tg://emoji?id=5447410659077661506)"
 
 # ================= FSM СОСТОЯНИЯ АДМИНА =================
 class AdminStates(StatesGroup):
@@ -183,58 +183,58 @@ def adjust_balance(user_id: int, delta: float) -> float:
     conn.close()
     return row["balance"] if row else 0.0
 
-# ================= КЛАВИАТУРЫ =================
+# ================= КЛАВИАТУРЫ С КАСТОМНЫМИ ЭМОДЗИ =================
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_PHONE} Взять номер", callback_data="get_number")],
-            [InlineKeyboardButton(text=f"{CUSTOM_MONEY} Баланс", callback_data="balance")],
-            [InlineKeyboardButton(text=f"{CUSTOM_GEAR} Правила", callback_data="rules")],
-            [InlineKeyboardButton(text=f"{CUSTOM_FOLDER} Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text=f"{BUTTON_PHONE} Взять номер", callback_data="get_number")],
+            [InlineKeyboardButton(text=f"{BUTTON_MONEY} Баланс", callback_data="balance")],
+            [InlineKeyboardButton(text=f"{BUTTON_GEAR} Правила", callback_data="rules")],
+            [InlineKeyboardButton(text=f"{BUTTON_FOLDER} Поддержка", callback_data="support")],
         ]
     )
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_CROSS} Назад", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text=f"{BUTTON_CROSS} Назад", callback_data="back_to_menu")]
         ]
     )
 
 def user_searching_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_CROSS} Отменить", callback_data=f"usercancel:{req_id}")]
+            [InlineKeyboardButton(text=f"{BUTTON_CROSS} Отменить", callback_data=f"usercancel:{req_id}")]
         ]
     )
 
 def user_issued_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_CHECK} Код отправлен!", callback_data=f"usercodesent:{req_id}")]
+            [InlineKeyboardButton(text=f"{BUTTON_CHECK} Код отправлен!", callback_data=f"usercodesent:{req_id}")]
         ]
     )
 
 def admin_new_request_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_CHECK} Выдать номер", callback_data=f"issue:{req_id}")],
-            [InlineKeyboardButton(text=f"{CUSTOM_CROSS} Отклонить", callback_data=f"reject:{req_id}")],
+            [InlineKeyboardButton(text=f"{BUTTON_CHECK} Выдать номер", callback_data=f"issue:{req_id}")],
+            [InlineKeyboardButton(text=f"{BUTTON_CROSS} Отклонить", callback_data=f"reject:{req_id}")],
         ]
     )
 
 def admin_waiting_sms_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_KEY} Ввести код", callback_data=f"entercode:{req_id}")],
+            [InlineKeyboardButton(text=f"{BUTTON_KEY} Ввести код", callback_data=f"entercode:{req_id}")],
         ]
     )
 
 def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{CUSTOM_CHECK} Отправить пользователю", callback_data=f"confirmsend:{req_id}")],
-            [InlineKeyboardButton(text=f"{CUSTOM_KEY} Ввести заново", callback_data=f"entercode:{req_id}")],
+            [InlineKeyboardButton(text=f"{BUTTON_CHECK} Отправить пользователю", callback_data=f"confirmsend:{req_id}")],
+            [InlineKeyboardButton(text=f"{BUTTON_KEY} Ввести заново", callback_data=f"entercode:{req_id}")],
         ]
     )
 
@@ -242,19 +242,19 @@ def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
     return (
-        f"{CUSTOM_STAR}{CUSTOM_SMALL_STAR}{CUSTOM_SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
+        f"{STAR}{SMALL_STAR}{SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
         "―――――――――――――――――\n"
-        f"{CUSTOM_USER} User: @{username} !\n"
-        f"{CUSTOM_FOLDER} ID: <code>{user_row['user_id']}</code>\n"
-        f"{CUSTOM_MONEY} Баланс: {user_row['balance']:.0f}$\n"
-        f"{CUSTOM_FOLDER} Всего куплено: {user_row['total_bought']}\n"
+        f"{USER} User: @{username} !\n"
+        f"{FOLDER} ID: <code>{user_row['user_id']}</code>\n"
+        f"{MONEY} Баланс: {user_row['balance']:.0f}$\n"
+        f"{FOLDER} Всего куплено: {user_row['total_bought']}\n"
         "―――――――――――――――――\n\n"
         "Кнопки :"
     )
 
 def build_waiting_admin_text(req: sqlite3.Row) -> str:
     return (
-        f"{CUSTOM_CHECK} <b>Вы отметили: код отправлен!</b>\n"
+        f"{BUTTON_CHECK} <b>Вы отметили: код отправлен!</b>\n"
         "―――――――――――――――――\n"
         f"┣ Номер: <code>{req['phone_number']}</code>\n"
         "┗ ⏳ Ожидайте, администратор вводит код...\n"
@@ -262,11 +262,11 @@ def build_waiting_admin_text(req: sqlite3.Row) -> str:
 
 def build_issued_text(req: sqlite3.Row) -> str:
     return (
-        f"{CUSTOM_CHECK} <b>Номер получен!</b>\n"
+        f"{BUTTON_CHECK} <b>Номер получен!</b>\n"
         "―――――――――――――――――\n"
         f"┣ Номер: <code>{req['phone_number']}</code>\n"
         "┣ Формат: СМС\n"
-        f"┗ {CUSTOM_MONEY} Остаток: 0.0000$\n\n"
+        f"┗ {BUTTON_MONEY} Остаток: 0.0000$\n\n"
         "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
     )
 
@@ -290,10 +290,10 @@ async def schedule_timeout(bot: Bot, req_id: int) -> None:
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
                 text=(
-                    f"{CUSTOM_WARNING} <b>СМС не пришло</b> {CUSTOM_WARNING}\n\n"
-                    f"{CUSTOM_PHONE_2} Номер был возвращён в сток\n\n"
-                    f"{CUSTOM_GLOBE} Штраф: {PENALTY_AMOUNT}$\n"
-                    f"{CUSTOM_MONEY} Ваш баланс: {new_balance:.2f}$"
+                    f"{WARNING} <b>СМС не пришло</b> {WARNING}\n\n"
+                    f"{PHONE_2} Номер был возвращён в сток\n\n"
+                    f"{GLOBE} Штраф: {PENALTY_AMOUNT}$\n"
+                    f"{MONEY} Ваш баланс: {new_balance:.2f}$"
                 ),
                 parse_mode="HTML",
             )
@@ -398,7 +398,7 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     req_id = create_request(user.id, user.username)
 
     await callback.message.edit_text(
-        f"{CUSTOM_PHONE_2} <b>В поиске номера</b>, ожидайте в течение 3 минут",
+        f"{PHONE_2} <b>В поиске номера</b>, ожидайте в течение 3 минут",
         reply_markup=user_searching_kb(req_id),
         parse_mode="HTML",
     )
@@ -441,7 +441,7 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     update_request(req_id, status="cancelled")
 
     await callback.message.edit_text(
-        f"{CUSTOM_CROSS} Заявка отменена.", reply_markup=None
+        f"{BUTTON_CROSS} Заявка отменена.", reply_markup=None
     )
 
     if req["admin_msg_chat_id"] and req["admin_msg_id"]:
@@ -449,7 +449,7 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
             await bot.edit_message_text(
                 chat_id=req["admin_msg_chat_id"],
                 message_id=req["admin_msg_id"],
-                text=f"{CUSTOM_CROSS} Заявка #{req_id} отменена пользователем @{req['username'] or req['user_id']}.",
+                text=f"{BUTTON_CROSS} Заявка #{req_id} отменена пользователем @{req['username'] or req['user_id']}.",
             )
         except Exception:
             logging.exception("Не удалось отредактировать сообщение админа (user cancel)")
@@ -460,7 +460,7 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
 async def cb_balance(callback: CallbackQuery) -> None:
     user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
     await callback.message.edit_text(
-        f"{CUSTOM_MONEY} <b>Ваш баланс:</b> {user_row['balance']:.0f}$\n\n"
+        f"{BUTTON_MONEY} <b>Ваш баланс:</b> {user_row['balance']:.0f}$\n\n"
         "Пополнение доступно через раздел поддержки.",
         reply_markup=back_kb(),
         parse_mode="HTML",
@@ -470,7 +470,7 @@ async def cb_balance(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        f"{CUSTOM_GEAR} <b>Правила пользования сервисом</b>\n\n"
+        f"{BUTTON_GEAR} <b>Правила пользования сервисом</b>\n\n"
         "1. Номер выдаётся на ограниченное время.\n"
         "2. Средства не возвращаются после успешной активации.\n"
         "3. Запрещена перепродажа номеров третьим лицам.",
@@ -482,7 +482,7 @@ async def cb_rules(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "support")
 async def cb_support(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        f"{CUSTOM_FOLDER} <b>Поддержка</b>\n\nПо всем вопросам пишите: @{SUPPORT_USERNAME}",
+        f"{BUTTON_FOLDER} <b>Поддержка</b>\n\nПо всем вопросам пишите: @{SUPPORT_USERNAME}",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
@@ -505,7 +505,7 @@ async def cb_issue_number(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(req_id=req_id)
 
     await callback.message.answer(
-        f"{CUSTOM_KEY} Введите номер телефона для заявки #{req_id} (например, +79991112233):"
+        f"{BUTTON_KEY} Введите номер телефона для заявки #{req_id} (например, +79991112233):"
     )
     await callback.answer()
 
@@ -524,7 +524,7 @@ async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
     update_request(req_id, status="rejected")
 
     await callback.message.edit_text(
-        f"{CUSTOM_CROSS} Заявка #{req_id} отклонена.", reply_markup=None
+        f"{BUTTON_CROSS} Заявка #{req_id} отклонена.", reply_markup=None
     )
 
     if req["user_msg_chat_id"] and req["user_msg_id"]:
@@ -532,7 +532,7 @@ async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
             await bot.edit_message_text(
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
-                text=f"{CUSTOM_CROSS} Ваша заявка отклонена администратором.",
+                text=f"{BUTTON_CROSS} Ваша заявка отклонена администратором.",
             )
         except Exception:
             logging.exception("Не удалось отредактировать сообщение пользователя (reject)")
@@ -572,7 +572,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             logging.exception("Не удалось отредактировать сообщение пользователя (issue)")
 
     await message.answer(
-        f"{CUSTOM_CHECK} Номер <code>{phone_number}</code> выдан @{req['username'] or req['user_id']}. "
+        f"{BUTTON_CHECK} Номер <code>{phone_number}</code> выдан @{req['username'] or req['user_id']}. "
         "Жду СМС на свой телефон.\n⏳ Таймер: 3 минуты.",
         reply_markup=admin_waiting_sms_kb(req_id),
         parse_mode="HTML",
@@ -583,7 +583,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             await bot.edit_message_text(
                 chat_id=req["admin_msg_chat_id"],
                 message_id=req["admin_msg_id"],
-                text=f"{CUSTOM_CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> выдан.",
+                text=f"{BUTTON_CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> выдан.",
                 parse_mode="HTML",
             )
         except Exception:
@@ -608,7 +608,7 @@ async def cb_enter_code(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(req_id=req_id)
 
     await callback.message.answer(
-        f"{CUSTOM_KEY} Введите СМС-код для номера <code>{req['phone_number']}</code>:",
+        f"{BUTTON_KEY} Введите СМС-код для номера <code>{req['phone_number']}</code>:",
         parse_mode="HTML",
     )
     await callback.answer()
@@ -654,7 +654,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await bot.send_message(
             req["user_id"],
-            f"{CUSTOM_KEY} <b>Код для номера {req['phone_number']}:</b>\n<code>{req['sms_code']}</code>",
+            f"{BUTTON_KEY} <b>Код для номера {req['phone_number']}:</b>\n<code>{req['sms_code']}</code>",
             parse_mode="HTML",
         )
         sent_ok = True
@@ -668,7 +668,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
                 chat_id=req["user_msg_chat_id"],
                 message_id=req["user_msg_id"],
                 text=(
-                    f"{CUSTOM_CHECK} <b>Номер {req['phone_number']}</b>\n"
+                    f"{BUTTON_CHECK} <b>Номер {req['phone_number']}</b>\n"
                     f"Код отправлен: <code>{req['sms_code']}</code>"
                 ),
                 parse_mode="HTML",
@@ -678,7 +678,7 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
 
     status_note = "отправлен" if sent_ok else "НЕ отправлен (ошибка, см. логи)"
     await callback.message.edit_text(
-        f"{CUSTOM_CHECK} Заявка #{req_id} завершена. Код {status_note} пользователю "
+        f"{BUTTON_CHECK} Заявка #{req_id} завершена. Код {status_note} пользователю "
         f"@{req['username'] or req['user_id']}.",
         reply_markup=None,
     )
@@ -715,7 +715,7 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
             await bot.send_message(
                 ADMIN_CHAT_ID,
                 (
-                    f"{CUSTOM_KEY} <b>Пользователь отправил код по заявке #{req_id}</b>\n"
+                    f"{BUTTON_KEY} <b>Пользователь отправил код по заявке #{req_id}</b>\n"
                     f"От: @{req['username'] or req['user_id']}\n"
                     f"Номер: <code>{req['phone_number']}</code>\n\n"
                     "✍️ Введите код в течение 3 минут, иначе заявка будет возвращена пользователю."
