@@ -779,6 +779,16 @@ def build_issued_text(req: sqlite3.Row) -> str:
         "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
     )
 
+def build_insufficient_balance_text(balance: float, price: float) -> str:
+    return (
+        f"{CROSS} <b>Недостаточно средств!</b>\n"
+        "―――――――――――――――――\n"
+        f"💰 Ваш баланс: {balance:.2f}$\n"
+        f"📱 Стоимость номера: {price:.2f}$\n"
+        f"❌ Не хватает: {(price - balance):.2f}$\n\n"
+        "Пополните баланс через раздел <b>«Баланс»</b> в меню."
+    )
+
 # ================= ТАЙМЕРЫ =================
 async def schedule_timeout(bot: Bot, req_id: int) -> None:
     try:
@@ -1504,15 +1514,31 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     else:
         await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
-# ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
+# ================= ОСНОВНОЙ ХЕНДЛЕР ВЗЯТЬ НОМЕР С ПРОВЕРКОЙ БАЛАНСА =================
 @router.callback_query(F.data == "get_number")
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
     
+    # Проверка бана
     if is_user_banned(user_id):
-        await callback.answer("Вы забанены!", show_alert=True)
+        await callback.answer("❌ Вы забанены!", show_alert=True)
         return
     
+    # Получаем данные пользователя и проверяем баланс
+    user_row = get_or_create_user(user_id, callback.from_user.username)
+    price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
+    
+    # Проверка баланса
+    if user_row["balance"] < price:
+        await callback.message.edit_text(
+            build_insufficient_balance_text(user_row["balance"], price),
+            reply_markup=back_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    
+    # Если баланс достаточен - создаем заявку
     user = callback.from_user
     req_id = create_request(user.id, user.username)
 
@@ -1530,7 +1556,9 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     if ADMIN_CHAT_ID:
         admin_msg = await bot.send_message(
             ADMIN_CHAT_ID,
-            f"🆕 <b>Новая заявка #{req_id}</b>\nОт: @{user.username or user.id}",
+            f"🆕 <b>Новая заявка #{req_id}</b>\n"
+            f"От: @{user.username or user.id}\n"
+            f"Баланс пользователя: {user_row['balance']:.2f}$",
             reply_markup=admin_new_request_kb(req_id),
             parse_mode="HTML",
         )
@@ -1544,6 +1572,7 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
+# ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
