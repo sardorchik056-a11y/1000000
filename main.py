@@ -21,12 +21,15 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLv
 
 SHOP_NAME = "Kretros SMS Shop"
 SUPPORT_USERNAME = "your_support_username"
+CRYPTOBOT_USERNAME = "cryptobot"  # юзернейм криптобота
+SEND_USERNAME = "send"  # юзернейм send бота
 
 ADMIN_CHAT_ID = 8118184388
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
 DB_PATH = "shop.db"
+MIN_DEPOSIT = 1  # минимальная сумма пополнения
 
 logging.basicConfig(level=logging.INFO)
 
@@ -70,10 +73,13 @@ CHECK = ce(EMOJI_CHECK_ID, "✔️")
 KEY = ce(EMOJI_KEY_ID, "🔑")
 GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
 
-# ================= FSM СОСТОЯНИЯ АДМИНА =================
+# ================= FSM СОСТОЯНИЯ =================
 class AdminStates(StatesGroup):
     waiting_number = State()
     waiting_code = State()
+
+class DepositStates(StatesGroup):
+    waiting_custom_amount = State()  # ожидание ввода суммы вручную
 
 # ================= БАЗА ДАННЫХ =================
 def db_connect() -> sqlite3.Connection:
@@ -109,6 +115,18 @@ def init_db() -> None:
             admin_msg_id INTEGER,
             created_at TEXT,
             issued_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deposits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount REAL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT,
+            completed_at TEXT
         )
         """
     )
@@ -182,8 +200,18 @@ def adjust_balance(user_id: int, delta: float) -> float:
     conn.close()
     return row["balance"] if row else 0.0
 
-# ================= КЛАВИАТУРЫ С КАСТОМНЫМИ ЭМОДЗИ В КНОПКАХ =================
-# В кнопках используем icon_custom_emoji_id
+def create_deposit(user_id: int, amount: float) -> int:
+    conn = db_connect()
+    cur = conn.execute(
+        "INSERT INTO deposits (user_id, amount, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (user_id, amount, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    deposit_id = cur.lastrowid
+    conn.close()
+    return deposit_id
+
+# ================= КЛАВИАТУРЫ =================
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -228,6 +256,95 @@ def back_kb() -> InlineKeyboardMarkup:
                     icon_custom_emoji_id=EMOJI_CROSS_ID
                 )
             ]
+        ]
+    )
+
+def balance_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Пополнить",
+                    callback_data="deposit",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="back_to_menu",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ],
+        ]
+    )
+
+def deposit_amount_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="5$",
+                    callback_data="deposit_amount:5",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                ),
+                InlineKeyboardButton(
+                    text="10$",
+                    callback_data="deposit_amount:10",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                ),
+                InlineKeyboardButton(
+                    text="25$",
+                    callback_data="deposit_amount:25",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="50$",
+                    callback_data="deposit_amount:50",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                ),
+                InlineKeyboardButton(
+                    text="150$",
+                    callback_data="deposit_amount:150",
+                    icon_custom_emoji_id=EMOJI_MONEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Ввести вручную",
+                    callback_data="deposit_custom",
+                    icon_custom_emoji_id=EMOJI_KEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="back_to_balance",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ],
+        ]
+    )
+
+def deposit_confirm_kb(deposit_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Я оплатил ✅",
+                    callback_data=f"deposit_paid:{deposit_id}",
+                    icon_custom_emoji_id=EMOJI_CHECK_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="back_to_deposit",
+                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                )
+            ],
         ]
     )
 
@@ -310,7 +427,7 @@ def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-# ================= ТЕКСТ ГЛАВНОГО МЕНЮ =================
+# ================= ТЕКСТЫ =================
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
     return (
@@ -322,6 +439,26 @@ def build_menu_text(user_row: sqlite3.Row) -> str:
         f"{FOLDER} Всего куплено: {user_row['total_bought']}\n"
         "―――――――――――――――――\n\n"
         "Кнопки :"
+    )
+
+def build_balance_text(user_row: sqlite3.Row) -> str:
+    return (
+        f"{MONEY} <b>Ваш баланс</b>\n"
+        "―――――――――――――――――\n"
+        f"Баланс: {user_row['balance']:.2f}$\n"
+        "―――――――――――――――――\n\n"
+        "Пополните баланс для продолжения работы с сервисом."
+    )
+
+def build_deposit_text(amount: float) -> str:
+    return (
+        f"{MONEY} <b>Пополнение баланса</b>\n"
+        "―――――――――――――――――\n"
+        f"Сумма: {amount:.2f}$\n\n"
+        f"Для оплаты переведите сумму в USDT (TRC-20) на адрес:\n"
+        f"<code>Ваш_кошелек_USDT_здесь</code>\n\n"
+        "После оплаты нажмите кнопку <b>«Я оплатил ✅»</b>\n"
+        "Пожалуйста, не закрывайте это окно до завершения оплаты!"
     )
 
 def build_waiting_admin_text(req: sqlite3.Row) -> str:
@@ -464,6 +601,161 @@ async def cb_back_to_menu(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
+@router.callback_query(F.data == "back_to_balance")
+async def cb_back_to_balance(callback: CallbackQuery) -> None:
+    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.edit_text(
+        build_balance_text(user_row),
+        reply_markup=balance_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_deposit")
+async def cb_back_to_deposit(callback: CallbackQuery) -> None:
+    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.edit_text(
+        build_balance_text(user_row),
+        reply_markup=deposit_amount_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+# ================= БАЛАНС И ПОПОЛНЕНИЕ =================
+@router.callback_query(F.data == "balance")
+async def cb_balance(callback: CallbackQuery) -> None:
+    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.edit_text(
+        build_balance_text(user_row),
+        reply_markup=balance_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "deposit")
+async def cb_deposit(callback: CallbackQuery) -> None:
+    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
+    await callback.message.edit_text(
+        f"{MONEY} <b>Выберите сумму пополнения</b>\n"
+        "―――――――――――――――――\n"
+        f"Минимальная сумма: {MIN_DEPOSIT}$\n\n"
+        "Выберите сумму или введите вручную:",
+        reply_markup=deposit_amount_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("deposit_amount:"))
+async def cb_deposit_amount(callback: CallbackQuery) -> None:
+    amount = float(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    
+    # Создаем заявку на пополнение
+    deposit_id = create_deposit(user_id, amount)
+    
+    await callback.message.edit_text(
+        build_deposit_text(amount),
+        reply_markup=deposit_confirm_kb(deposit_id),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "deposit_custom")
+async def cb_deposit_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(DepositStates.waiting_custom_amount)
+    await callback.message.edit_text(
+        f"{KEY} <b>Введите сумму пополнения</b>\n"
+        "―――――――――――――――――\n"
+        f"Минимальная сумма: {MIN_DEPOSIT}$\n\n"
+        "Введите сумму цифрами (например: 7, 15, 30):",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.message(DepositStates.waiting_custom_amount)
+async def process_custom_amount(message: Message, state: FSMContext) -> None:
+    try:
+        amount = float(message.text.replace(",", "."))
+        if amount < MIN_DEPOSIT:
+            await message.answer(
+                f"❌ Минимальная сумма пополнения: {MIN_DEPOSIT}$\n"
+                "Пожалуйста, введите сумму больше.",
+                parse_mode="HTML",
+            )
+            return
+        
+        user_id = message.from_user.id
+        deposit_id = create_deposit(user_id, amount)
+        
+        await message.answer(
+            build_deposit_text(amount),
+            reply_markup=deposit_confirm_kb(deposit_id),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        
+    except ValueError:
+        await message.answer(
+            "❌ Пожалуйста, введите корректное число (например: 7, 15, 30)",
+            parse_mode="HTML",
+        )
+
+@router.callback_query(F.data.startswith("deposit_paid:"))
+async def cb_deposit_paid(callback: CallbackQuery, bot: Bot) -> None:
+    deposit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    
+    # Получаем информацию о депозите из БД
+    conn = db_connect()
+    deposit = conn.execute(
+        "SELECT * FROM deposits WHERE id = ? AND user_id = ?",
+        (deposit_id, user_id)
+    ).fetchone()
+    conn.close()
+    
+    if deposit is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    
+    if deposit["status"] != "pending":
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
+        return
+    
+    # Начисляем средства
+    new_balance = adjust_balance(user_id, deposit["amount"])
+    
+    # Обновляем статус депозита
+    conn = db_connect()
+    conn.execute(
+        "UPDATE deposits SET status = 'completed', completed_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), deposit_id)
+    )
+    conn.commit()
+    conn.close()
+    
+    await callback.message.edit_text(
+        f"{CHECK} <b>Пополнение успешно!</b>\n"
+        "―――――――――――――――――\n"
+        f"Сумма: {deposit['amount']:.2f}$\n"
+        f"Новый баланс: {new_balance:.2f}$\n\n"
+        "Спасибо за пополнение!",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    
+    # Уведомление админа
+    await bot.send_message(
+        ADMIN_CHAT_ID,
+        f"{MONEY} <b>Пополнение баланса</b>\n"
+        f"Пользователь: @{callback.from_user.username or callback.from_user.id}\n"
+        f"Сумма: {deposit['amount']:.2f}$\n"
+        f"Новый баланс: {new_balance:.2f}$",
+        parse_mode="HTML",
+    )
+
+# ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data == "get_number")
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user = callback.from_user
@@ -497,6 +789,32 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
+@router.callback_query(F.data == "rules")
+async def cb_rules(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        f"{GEAR} <b>Правила пользования сервисом</b>\n\n"
+        "1. Номер выдаётся на ограниченное время.\n"
+        "2. Средства не возвращаются после успешной активации.\n"
+        "3. Запрещена перепродажа номеров третьим лицам.",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "support")
+async def cb_support(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        f"{FOLDER} <b>Поддержка</b>\n\n"
+        f"По всем вопросам пишите: @{SUPPORT_USERNAME}\n\n"
+        f"Пополнение через:\n"
+        f"• @{SEND_USERNAME}\n"
+        f"• @{CRYPTOBOT_USERNAME}",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+# ================= АДМИНСКИЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data.startswith("usercancel:"))
 async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
@@ -528,39 +846,6 @@ async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
-@router.callback_query(F.data == "balance")
-async def cb_balance(callback: CallbackQuery) -> None:
-    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
-    await callback.message.edit_text(
-        f"{MONEY} <b>Ваш баланс:</b> {user_row['balance']:.0f}$\n\n"
-        "Пополнение доступно через раздел поддержки.",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "rules")
-async def cb_rules(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        f"{GEAR} <b>Правила пользования сервисом</b>\n\n"
-        "1. Номер выдаётся на ограниченное время.\n"
-        "2. Средства не возвращаются после успешной активации.\n"
-        "3. Запрещена перепродажа номеров третьим лицам.",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "support")
-async def cb_support(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        f"{FOLDER} <b>Поддержка</b>\n\nПо всем вопросам пишите: @{SUPPORT_USERNAME}",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-# ================= АДМИНСКИЕ ХЕНДЛЕРЫ =================
 @router.callback_query(F.data.startswith("issue:"))
 async def cb_issue_number(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_chat(callback.message.chat.id):
@@ -756,7 +1041,6 @@ async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
     )
     await callback.answer()
 
-# ================= ПОЛЬЗОВАТЕЛЬ НАЖИМАЕТ «КОД ОТПРАВЛЕН!» =================
 @router.callback_query(F.data.startswith("usercodesent:"))
 async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
