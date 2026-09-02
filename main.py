@@ -22,7 +22,7 @@ from aiogram.types import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "your_support_username"
+SUPPORT_USERNAME = "DATROQ"
 
 ADMIN_CHAT_ID = 8118184388
 
