@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, StateFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -22,14 +22,14 @@ from aiogram.types import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "DATROQ"
+SUPPORT_USERNAME = "DATROQ"  # ваш юзернейм
 
+ADMIN_USERNAME = "DATROQ"  # юзернейм админа
 ADMIN_CHAT_ID = 8118184388  # ID админа (ваш ID)
-ADMIN_USERNAME = "sa"  # ваш юзернейм
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
-PRICE_PER_NUMBER = 1.0  # цена за один номер
+PRICE_PER_NUMBER = 1.0
 DB_PATH = "shop.db"
 MIN_DEPOSIT = 1
 
@@ -112,7 +112,9 @@ def migrate_database() -> None:
         logging.info("✅ Колонка is_banned добавлена в таблицу users")
     
     # Добавляем колонку completed_at в таблицу requests если её нет
-    if 'completed_at' not in columns:
+    cursor.execute("PRAGMA table_info(requests)")
+    req_columns = [column[1] for column in cursor.fetchall()]
+    if 'completed_at' not in req_columns:
         cursor.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
         logging.info("✅ Колонка completed_at добавлена в таблицу requests")
     
@@ -336,6 +338,14 @@ def is_user_banned(user_id: int) -> bool:
     conn.close()
     return row["is_banned"] == 1 if row else False
 
+def is_admin_user(user_id: int, username: str = None) -> bool:
+    """Проверка является ли пользователь админом по ID или юзернейму"""
+    if user_id == ADMIN_CHAT_ID:
+        return True
+    if username and username.lower() == ADMIN_USERNAME.lower():
+        return True
+    return False
+
 # ================= CRYPTOBOT API =================
 class CryptoBotAPI:
     def __init__(self, token: str):
@@ -447,9 +457,8 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="back_to_menu",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
+                    text="◀️ Выйти из админки",
+                    callback_data="exit_admin"
                 )
             ],
         ]
@@ -873,9 +882,6 @@ def cancel_timer(req_id: int) -> None:
 def is_admin_chat(chat_id: int) -> bool:
     return chat_id == ADMIN_CHAT_ID
 
-def is_admin_user(user_id: int) -> bool:
-    return user_id == ADMIN_CHAT_ID
-
 # ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
@@ -884,41 +890,47 @@ async def cmd_start(message: Message) -> None:
     # Проверка бана
     if is_user_banned(user_id):
         await message.answer(
-            "❌ Вы забанены в боте. Обратитесь к администратору @sardorchik056.",
+            "❌ Вы забанены в боте. Обратитесь к администратору @DATROQ.",
             parse_mode="HTML",
         )
         return
     
     user_row = get_or_create_user(message.from_user.id, message.from_user.username)
     
-    # Если это админ - показываем админ-меню
-    if is_admin_user(user_id):
-        await message.answer(
-            f"{GEAR} <b>Админ-панель</b>\n\n"
-            "Добро пожаловать в админ-панель бота!",
-            reply_markup=admin_menu_kb(),
-            parse_mode="HTML",
-        )
-        return
-    
+    # Всегда показываем простое меню для всех пользователей
     await message.answer(
         build_menu_text(user_row),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
 
-@router.callback_query(F.data == "back_to_menu")
-async def cb_back_to_menu(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    user_id = message.from_user.id
+    username = message.from_user.username
     
-    if is_admin_user(user_id):
-        await callback.message.edit_text(
-            f"{GEAR} <b>Админ-панель</b>\n\n"
-            "Добро пожаловать в админ-панель бота!",
-            reply_markup=admin_menu_kb(),
+    # Проверяем является ли пользователь админом
+    if not is_admin_user(user_id, username):
+        await message.answer(
+            "❌ У вас нет доступа к админ-панели!",
             parse_mode="HTML",
         )
-        await callback.answer()
+        return
+    
+    # Показываем админ-панель
+    await message.answer(
+        f"{GEAR} <b>Админ-панель</b>\n\n"
+        "Добро пожаловать в админ-панель бота!",
+        reply_markup=admin_menu_kb(),
+        parse_mode="HTML",
+    )
+
+@router.callback_query(F.data == "exit_admin")
+async def cb_exit_admin(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    
+    if not is_admin_user(user_id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
         return
     
     user_row = get_or_create_user(user_id, callback.from_user.username)
@@ -929,8 +941,23 @@ async def cb_back_to_menu(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
+@router.callback_query(F.data == "back_to_menu")
+async def cb_back_to_menu(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    user_row = get_or_create_user(user_id, callback.from_user.username)
+    await callback.message.edit_text(
+        build_menu_text(user_row),
+        reply_markup=main_menu_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
 @router.callback_query(F.data == "admin_back")
 async def cb_admin_back(callback: CallbackQuery) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    
     await callback.message.edit_text(
         f"{GEAR} <b>Админ-панель</b>\n\n"
         "Добро пожаловать в админ-панель бота!",
@@ -942,23 +969,20 @@ async def cb_admin_back(callback: CallbackQuery) -> None:
 # ================= АДМИН-ПАНЕЛЬ =================
 @router.callback_query(F.data == "admin_stats")
 async def cb_admin_stats(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
     conn = db_connect()
     
-    # Статистика пользователей
     users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     banned_count = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
     
-    # Статистика заявок
     total_requests = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
     pending_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'pending'").fetchone()[0]
     completed_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'completed'").fetchone()[0]
     expired_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'expired'").fetchone()[0]
     
-    # Статистика депозитов
     total_deposits = conn.execute("SELECT COUNT(*) FROM deposits").fetchone()[0]
     total_amount = conn.execute("SELECT SUM(amount) FROM deposits WHERE status = 'completed'").fetchone()[0] or 0
     
@@ -985,7 +1009,7 @@ async def cb_admin_stats(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin_prices")
 async def cb_admin_prices(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -999,7 +1023,7 @@ async def cb_admin_prices(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin_edit_price")
 async def cb_admin_edit_price(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1016,7 +1040,7 @@ async def cb_admin_edit_price(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.message(AdminStates.waiting_price)
 async def process_price_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id):
+    if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
     
@@ -1041,7 +1065,7 @@ async def process_price_change(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin_edit_penalty")
 async def cb_admin_edit_penalty(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1058,7 +1082,7 @@ async def cb_admin_edit_penalty(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.message(AdminStates.waiting_penalty)
 async def process_penalty_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id):
+    if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
     
@@ -1083,7 +1107,7 @@ async def process_penalty_change(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin_edit_timeout")
 async def cb_admin_edit_timeout(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1100,7 +1124,7 @@ async def cb_admin_edit_timeout(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.message(AdminStates.waiting_timeout)
 async def process_timeout_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id):
+    if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
     
@@ -1129,7 +1153,7 @@ async def process_timeout_change(message: Message, state: FSMContext) -> None:
 # ================= АДМИН-РАССЫЛКА =================
 @router.callback_query(F.data == "admin_broadcast")
 async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1147,7 +1171,7 @@ async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.message(AdminStates.waiting_broadcast)
 async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not is_admin_user(message.from_user.id):
+    if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
     
@@ -1188,7 +1212,7 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
 # ================= АДМИН-ПОЛЬЗОВАТЕЛИ =================
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1202,7 +1226,7 @@ async def cb_admin_users(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin_user_list")
 async def cb_admin_user_list(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1232,7 +1256,7 @@ async def cb_admin_user_list(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin_ban_user")
 async def cb_admin_ban_user(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1249,7 +1273,7 @@ async def cb_admin_ban_user(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin_unban_user")
 async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id):
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
     
@@ -1264,10 +1288,10 @@ async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> Non
     )
     await callback.answer()
 
-# Обработчик для бана/разбана (текстовый ввод после нажатия кнопок)
+# Обработчик для бана/разбана
 @router.message(F.text & ~F.text.startswith('/'))
 async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id):
+    if not is_admin_user(message.from_user.id, message.from_user.username):
         return
     
     current_state = await state.get_state()
@@ -1652,7 +1676,6 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
 
     phone_number = message.text.strip()
     
-    # Списание средств
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
     new_balance = adjust_balance(req["user_id"], -price)
     
