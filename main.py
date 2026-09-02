@@ -22,10 +22,10 @@ from aiogram.types import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "your_support_username"
+SUPPORT_USERNAME = "DATROQ"
 
 ADMIN_CHAT_ID = 8118184388  # ID админа (ваш ID)
-ADMIN_USERNAME = "sardorchik056"  # ваш юзернейм
+ADMIN_USERNAME = "sыыы"  # ваш юзернейм
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
@@ -34,7 +34,7 @@ DB_PATH = "shop.db"
 MIN_DEPOSIT = 1
 
 # ================= НАСТРОЙКИ CRYPTOBOT API =================
-CRYPTOBOT_API_TOKEN = "ВАШ_API_ТОКЕН_ОТ_CRYPTOBOT"
+CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 PAY_ASSET = "USDT"
 
