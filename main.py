@@ -25,7 +25,7 @@ SHOP_NAME = "Kretros SMS Shop"
 SUPPORT_USERNAME = "DATROQ"
 
 ADMIN_CHAT_ID = 8118184388  # ID админа (ваш ID)
-ADMIN_USERNAME = "sыыы"  # ваш юзернейм
+ADMIN_USERNAME = "sa"  # ваш юзернейм
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
@@ -85,15 +85,39 @@ class AdminStates(StatesGroup):
     waiting_penalty = State()
     waiting_timeout = State()
     waiting_broadcast = State()
+    waiting_ban = State()
+    waiting_unban = State()
 
 class DepositStates(StatesGroup):
     waiting_custom_amount = State()
 
-# ================= БАЗА ДАННЫХ =================
+# ================= БАЗА ДАННЫХ С МИГРАЦИЕЙ =================
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def migrate_database() -> None:
+    """Миграция базы данных - добавление недостающих колонок"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    
+    # Проверяем таблицу users
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    # Добавляем колонку is_banned если её нет
+    if 'is_banned' not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT 0")
+        logging.info("✅ Колонка is_banned добавлена в таблицу users")
+    
+    # Добавляем колонку completed_at в таблицу requests если её нет
+    if 'completed_at' not in columns:
+        cursor.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
+        logging.info("✅ Колонка completed_at добавлена в таблицу requests")
+    
+    conn.commit()
+    conn.close()
 
 def init_db() -> None:
     conn = db_connect()
@@ -173,6 +197,9 @@ def init_db() -> None:
     
     conn.commit()
     conn.close()
+    
+    # Запускаем миграцию
+    migrate_database()
 
 def get_setting(key: str) -> str:
     conn = db_connect()
@@ -194,8 +221,8 @@ def get_or_create_user(user_id: int, username: str | None) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     if row is None:
         conn.execute(
-            "INSERT INTO users (user_id, username, balance, total_bought, created_at) "
-            "VALUES (?, ?, 0, 0, ?)",
+            "INSERT INTO users (user_id, username, balance, total_bought, created_at, is_banned) "
+            "VALUES (?, ?, 0, 0, ?, 0)",
             (user_id, username, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
@@ -1127,7 +1154,6 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
     text = message.text
     users = get_all_users()
     
-    # Отправляем уведомление админу о начале рассылки
     await message.answer(
         f"{CHECK} <b>Начинаю рассылку...</b>\n"
         f"Пользователей: {len(users)}",
@@ -1145,7 +1171,7 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
                 parse_mode="HTML",
             )
             success += 1
-            await asyncio.sleep(0.1)  # задержка чтобы не упасть в лимиты
+            await asyncio.sleep(0.1)
         except Exception:
             fail += 1
     
@@ -1205,11 +1231,12 @@ async def cb_admin_user_list(callback: CallbackQuery) -> None:
     await callback.answer()
 
 @router.callback_query(F.data == "admin_ban_user")
-async def cb_admin_ban_user(callback: CallbackQuery) -> None:
+async def cb_admin_ban_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True)
         return
     
+    await state.set_state(AdminStates.waiting_ban)
     await callback.message.edit_text(
         f"{CROSS} <b>Бан пользователя</b>\n"
         "―――――――――――――――――\n"
@@ -1221,11 +1248,12 @@ async def cb_admin_ban_user(callback: CallbackQuery) -> None:
     await callback.answer()
 
 @router.callback_query(F.data == "admin_unban_user")
-async def cb_admin_unban_user(callback: CallbackQuery) -> None:
+async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True)
         return
     
+    await state.set_state(AdminStates.waiting_unban)
     await callback.message.edit_text(
         f"{CHECK} <b>Разбан пользователя</b>\n"
         "―――――――――――――――――\n"
@@ -1242,9 +1270,10 @@ async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id):
         return
     
+    current_state = await state.get_state()
+    
     try:
         user_id = int(message.text.strip())
-        current_state = await state.get_state()
         
         if current_state == "AdminStates:waiting_ban":
             ban_user(user_id)
