@@ -33,7 +33,7 @@ MIN_DEPOSIT = 1  # минимальная сумма пополнения
 
 # ================= НАСТРОЙКИ CRYPTOBOT API =================
 # Получите API ключ здесь: https://t.me/CryptoBot
-CRYPTOBOT_API_TOKEN = "ВАШ_API_ТОКЕН_ОТ_CRYPTOBOT"  # Замените на ваш токен
+CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"  # Замените на ваш токен
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 PAY_ASSET = "USDT"  # основная валюта для оплаты
 
