@@ -1756,14 +1756,19 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
         )
         await callback.answer("✅ Оплата подтверждена!")
 
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"{MONEY} <b>Пополнение баланса</b>\n"
-            f"Пользователь: @{callback.from_user.username or user_id}\n"
-            f"Сумма: {deposit['amount']:.2f}$\n"
-            f"Новый баланс: {new_balance:.2f}$",
-            parse_mode="HTML",
-        )
+        try:
+            await bot.send_message(
+                ADMIN_CHAT_ID,
+                f"{MONEY} <b>Пополнение баланса</b>\n"
+                f"Пользователь: @{callback.from_user.username or user_id}\n"
+                f"Сумма: {deposit['amount']:.2f}$\n"
+                f"Новый баланс: {new_balance:.2f}$",
+                parse_mode="HTML",
+            )
+        except Exception:
+            logging.exception(
+                f"Не удалось уведомить админа о депозите (invoice {deposit['invoice_id']})"
+            )
     else:
         await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
@@ -1807,19 +1812,33 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     )
 
     if ADMIN_CHAT_ID:
-        admin_msg = await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"🆕 <b>Новая заявка #{req_id}</b>\n"
-            f"От: @{user.username or user.id}\n"
-            f"Баланс пользователя: {user_row['balance']:.2f}$",
-            reply_markup=admin_new_request_kb(req_id),
-            parse_mode="HTML",
-        )
-        update_request(
-            req_id,
-            admin_msg_chat_id=admin_msg.chat.id,
-            admin_msg_id=admin_msg.message_id,
-        )
+        try:
+            admin_msg = await bot.send_message(
+                ADMIN_CHAT_ID,
+                f"🆕 <b>Новая заявка #{req_id}</b>\n"
+                f"От: @{user.username or user.id}\n"
+                f"Баланс пользователя: {user_row['balance']:.2f}$",
+                reply_markup=admin_new_request_kb(req_id),
+                parse_mode="HTML",
+            )
+            update_request(
+                req_id,
+                admin_msg_chat_id=admin_msg.chat.id,
+                admin_msg_id=admin_msg.message_id,
+            )
+        except Exception:
+            logging.exception(
+                f"Не удалось отправить админу уведомление о заявке #{req_id}"
+            )
+            try:
+                await callback.message.edit_text(
+                    f"{WARNING} <b>Не удалось передать заявку администратору.</b>\n"
+                    "Попробуйте ещё раз позже или напишите в поддержку.",
+                    reply_markup=back_kb(),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logging.exception("Не удалось уведомить пользователя об ошибке отправки заявки админу")
     else:
         logging.warning("ADMIN_CHAT_ID не настроен — заявка не будет отправлена админу")
 
