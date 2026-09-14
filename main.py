@@ -87,6 +87,7 @@ class AdminStates(StatesGroup):
     waiting_broadcast = State()
     waiting_ban = State()
     waiting_unban = State()
+    waiting_channel = State()
 
 class DepositStates(StatesGroup):
     waiting_custom_amount = State()
@@ -455,8 +456,65 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🔒 Обязательная подписка",
+                    callback_data="admin_subscription"
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="◀️ Выйти из админки",
                     callback_data="exit_admin"
+                )
+            ],
+        ]
+    )
+
+def admin_subscription_kb() -> InlineKeyboardMarkup:
+    channel = get_setting("required_channel")
+    buttons = []
+    if channel:
+        buttons.append([
+            InlineKeyboardButton(
+                text="✏️ Изменить канал",
+                callback_data="admin_set_channel"
+            )
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="🗑 Отключить обязательную подписку",
+                callback_data="admin_remove_channel"
+            )
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="➕ Установить канал",
+                callback_data="admin_set_channel"
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="Назад",
+            callback_data="admin_back",
+            icon_custom_emoji_id=EMOJI_CROSS_ID
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def subscription_required_kb(channel: str) -> InlineKeyboardMarkup:
+    channel_url = f"https://t.me/{channel.lstrip('@')}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📢 Перейти в канал",
+                    url=channel_url
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Я подписался",
+                    callback_data="check_sub"
                 )
             ],
         ]
@@ -790,6 +848,38 @@ def build_issued_text(req: sqlite3.Row) -> str:
         "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
     )
 
+def build_subscription_required_text() -> str:
+    channel = get_setting("required_channel")
+    title = get_setting("required_channel_title") or channel
+    return (
+        f"{STAR}{SMALL_STAR}{SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
+        "―――――――――――――――――\n"
+        f"{WARNING} <b>Доступ ограничен</b>\n\n"
+        "Чтобы пользоваться сервисом, подпишитесь на наш канал:\n\n"
+        f"{GLOBE} <b>{title}</b>\n"
+        f"<code>{channel}</code>\n"
+        "―――――――――――――――――\n\n"
+        "После подписки нажмите кнопку <b>«Я подписался»</b> ниже 👇"
+    )
+
+def build_admin_subscription_text() -> str:
+    channel = get_setting("required_channel")
+    title = get_setting("required_channel_title")
+    if channel:
+        status_block = f"{CHECK} Канал: <b>{title or channel}</b>\n<code>{channel}</code>"
+    else:
+        status_block = f"{CROSS} Обязательная подписка не настроена"
+    return (
+        f"{GLOBE} <b>Обязательная подписка на канал</b>\n"
+        "―――――――――――――――――\n"
+        f"{status_block}\n"
+        "―――――――――――――――――\n\n"
+        "Пока подписка включена, пользователи не смогут открыть меню бота, "
+        "не подписавшись на указанный канал.\n\n"
+        f"{WARNING} Бот обязательно должен быть добавлен в канал администратором — "
+        "иначе проверка подписки работать не будет."
+    )
+
 def build_insufficient_balance_text(balance: float, price: float) -> str:
     return (
         f"{CROSS} <b>Недостаточно средств!</b>\n"
@@ -903,9 +993,20 @@ def cancel_timer(req_id: int) -> None:
 def is_admin_chat(chat_id: int) -> bool:
     return chat_id == ADMIN_CHAT_ID
 
+async def check_user_subscribed(bot: Bot, user_id: int) -> bool:
+    channel = get_setting("required_channel")
+    if not channel:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        logging.exception("Не удалось проверить подписку пользователя на канал")
+        return False
+
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
 
 
@@ -915,6 +1016,17 @@ async def cmd_start(message: Message) -> None:
             parse_mode="HTML",
         )
         return
+
+    required_channel = get_setting("required_channel")
+    if required_channel:
+        subscribed = await check_user_subscribed(bot, user_id)
+        if not subscribed:
+            await message.answer(
+                build_subscription_required_text(),
+                reply_markup=subscription_required_kb(required_channel),
+                parse_mode="HTML",
+            )
+            return
 
     user_row = get_or_create_user(message.from_user.id, message.from_user.username)
 
@@ -1230,6 +1342,136 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
     )
     await state.clear()
 
+
+@router.callback_query(F.data == "admin_subscription")
+async def cb_admin_subscription(callback: CallbackQuery) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        build_admin_subscription_text(),
+        reply_markup=admin_subscription_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_set_channel")
+async def cb_admin_set_channel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_channel)
+    await callback.message.edit_text(
+        f"{KEY} <b>Укажите канал для обязательной подписки</b>\n"
+        "―――――――――――――――――\n"
+        "Отправьте username канала в формате:\n<code>@your_channel</code>\n\n"
+        f"{WARNING} Бот должен быть добавлен в канал в роли <b>администратора</b>, "
+        "иначе проверка подписки работать не будет.",
+        reply_markup=admin_back_kb("admin_subscription"),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_channel)
+async def process_channel_input(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await message.answer("Недоступно")
+        return
+
+    channel = message.text.strip()
+
+    if not channel.startswith("@"):
+        await message.answer(
+            f"{CROSS} Введите username канала в формате <code>@channel_username</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        chat = await bot.get_chat(channel)
+    except Exception:
+        await message.answer(
+            f"{CROSS} Канал не найден. Проверьте username и попробуйте снова.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat_id=channel, user_id=me.id)
+        if member.status not in ("administrator", "creator"):
+            await message.answer(
+                f"{CROSS} Бот не является администратором канала «{chat.title}».\n"
+                "Добавьте бота в администраторы канала и попробуйте снова.",
+                parse_mode="HTML",
+            )
+            return
+    except Exception:
+        await message.answer(
+            f"{CROSS} Не удалось проверить права бота в канале. "
+            "Убедитесь, что бот добавлен как администратор, и повторите попытку.",
+            parse_mode="HTML",
+        )
+        return
+
+    set_setting("required_channel", channel)
+    set_setting("required_channel_title", chat.title or channel)
+
+    await message.answer(
+        f"{CHECK} <b>Обязательная подписка настроена!</b>\n"
+        "―――――――――――――――――\n"
+        f"Канал: <b>{chat.title}</b>\n"
+        f"<code>{channel}</code>",
+        reply_markup=admin_subscription_kb(),
+        parse_mode="HTML",
+    )
+    await state.clear()
+
+@router.callback_query(F.data == "admin_remove_channel")
+async def cb_admin_remove_channel(callback: CallbackQuery) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    set_setting("required_channel", "")
+    set_setting("required_channel_title", "")
+
+    await callback.message.edit_text(
+        build_admin_subscription_text(),
+        reply_markup=admin_subscription_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer("Обязательная подписка отключена")
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(callback: CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    required_channel = get_setting("required_channel")
+
+    if not required_channel:
+        user_row = get_or_create_user(user_id, callback.from_user.username)
+        await callback.message.edit_text(
+            build_menu_text(user_row),
+            reply_markup=main_menu_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    subscribed = await check_user_subscribed(bot, user_id)
+
+    if subscribed:
+        user_row = get_or_create_user(user_id, callback.from_user.username)
+        await callback.message.edit_text(
+            build_menu_text(user_row),
+            reply_markup=main_menu_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer("✅ Подписка подтверждена!")
+    else:
+        await callback.answer("❌ Вы всё ещё не подписаны на канал", show_alert=True)
 
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery) -> None:
