@@ -18,14 +18,14 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-                                               
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "DATROQ"                
+SUPPORT_USERNAME = "DATROQ"
 
-ADMIN_USERNAME = "DATROQ"                   
-ADMIN_CHAT_ID = 8118184388                      
+ADMIN_USERNAME = "DATROQ"
+ADMIN_CHAT_ID = 8118184388
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
@@ -33,7 +33,7 @@ PRICE_PER_NUMBER = 1.0
 DB_PATH = "shop.db"
 MIN_DEPOSIT = 1
 
-                                                             
+
 CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 PAY_ASSET = "USDT"
@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO)
 router = Router()
 active_timers: dict[int, asyncio.Task] = {}
 
-                                                                       
+
 EMOJI_STAR_ID = "5906581476639513176"
 EMOJI_SMALL_STAR_ID = "5445353829304387411"
 EMOJI_SMALL_STAR_2_ID = "6078158956188930337"
@@ -77,7 +77,7 @@ CHECK = ce(EMOJI_CHECK_ID, "✔️")
 KEY = ce(EMOJI_KEY_ID, "🔑")
 GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
 
-                                                   
+
 class AdminStates(StatesGroup):
     waiting_number = State()
     waiting_code = State()
@@ -91,7 +91,7 @@ class AdminStates(StatesGroup):
 class DepositStates(StatesGroup):
     waiting_custom_amount = State()
 
-                                                             
+
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -100,30 +100,30 @@ def db_connect() -> sqlite3.Connection:
 def migrate_database() -> None:
     conn = db_connect()
     cursor = conn.cursor()
-    
-                             
+
+
     cursor.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in cursor.fetchall()]
-    
-                                             
+
+
     if 'is_banned' not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT 0")
         logging.info("✅ Колонка is_banned добавлена в таблицу users")
-    
-                                                                   
+
+
     cursor.execute("PRAGMA table_info(requests)")
     req_columns = [column[1] for column in cursor.fetchall()]
     if 'completed_at' not in req_columns:
         cursor.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
         logging.info("✅ Колонка completed_at добавлена в таблицу requests")
-    
+
     conn.commit()
     conn.close()
 
 def init_db() -> None:
     conn = db_connect()
-    
-                           
+
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -136,8 +136,8 @@ def init_db() -> None:
         )
         """
     )
-    
-                    
+
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS requests (
@@ -157,8 +157,8 @@ def init_db() -> None:
         )
         """
     )
-    
-                       
+
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS deposits (
@@ -172,8 +172,8 @@ def init_db() -> None:
         )
         """
     )
-    
-                      
+
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS settings (
@@ -182,24 +182,24 @@ def init_db() -> None:
         )
         """
     )
-    
-                                      
+
+
     settings = [
         ("price_per_number", str(PRICE_PER_NUMBER)),
         ("penalty_amount", str(PENALTY_AMOUNT)),
         ("timeout_seconds", str(REQUEST_TIMEOUT_SECONDS)),
     ]
-    
+
     for key, value in settings:
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
             (key, value)
         )
-    
+
     conn.commit()
     conn.close()
-    
-                        
+
+
     migrate_database()
 
 def get_setting(key: str) -> str:
@@ -344,7 +344,7 @@ def is_admin_user(user_id: int, username: str = None) -> bool:
         return True
     return False
 
-                                                   
+
 class CryptoBotAPI:
     def __init__(self, token: str):
         self.token = token
@@ -352,7 +352,7 @@ class CryptoBotAPI:
             "Crypto-Pay-API-Token": token,
             "Content-Type": "application/json"
         }
-    
+
     async def create_invoice(self, amount: float, asset: str = "USDT", description: str = "Пополнение баланса") -> dict:
         url = f"{CRYPTOBOT_API_URL}/createInvoice"
         payload = {
@@ -363,7 +363,7 @@ class CryptoBotAPI:
             "paid_btn_name": "openChannel",
             "paid_btn_url": "https://t.me/Kretros_sms_bot"
         }
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=payload) as response:
                 if response.status == 200:
@@ -376,11 +376,11 @@ class CryptoBotAPI:
                 else:
                     logging.error(f"CryptoBot API HTTP error: {response.status}")
                     return None
-    
+
     async def get_invoice_status(self, invoice_id: str) -> dict:
         url = f"{CRYPTOBOT_API_URL}/getInvoices"
         payload = {"invoice_ids": [invoice_id]}
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=payload) as response:
                 if response.status == 200:
@@ -391,7 +391,7 @@ class CryptoBotAPI:
 
 crypto_api = CryptoBotAPI(CRYPTOBOT_API_TOKEN)
 
-                                                
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -466,7 +466,7 @@ def admin_prices_kb() -> InlineKeyboardMarkup:
     price = get_setting("price_per_number") or PRICE_PER_NUMBER
     penalty = get_setting("penalty_amount") or PENALTY_AMOUNT
     timeout = get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS
-    
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -490,7 +490,7 @@ def admin_prices_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="Назад",
-                    callback_data="admin_prices",
+                    callback_data="admin_back",
                     icon_custom_emoji_id=EMOJI_CROSS_ID
                 )
             ],
@@ -521,7 +521,7 @@ def admin_users_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="Назад",
-                    callback_data="admin_users",
+                    callback_data="admin_back",
                     icon_custom_emoji_id=EMOJI_CROSS_ID
                 )
             ],
@@ -728,7 +728,7 @@ def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-                                            
+
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
     return (
@@ -800,7 +800,7 @@ def build_insufficient_balance_text(balance: float, price: float) -> str:
         "Пополните баланс через раздел <b>«Баланс»</b> в меню."
     )
 
-                                             
+
 async def schedule_timeout(bot: Bot, req_id: int) -> None:
     try:
         penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
@@ -903,22 +903,22 @@ def cancel_timer(req_id: int) -> None:
 def is_admin_chat(chat_id: int) -> bool:
     return chat_id == ADMIN_CHAT_ID
 
-                                                               
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     user_id = message.from_user.id
-    
-                   
+
+
     if is_user_banned(user_id):
         await message.answer(
             "❌ Вы забанены в боте. Обратитесь к администратору @DATROQ.",
             parse_mode="HTML",
         )
         return
-    
+
     user_row = get_or_create_user(message.from_user.id, message.from_user.username)
-    
-                                                           
+
+
     await message.answer(
         build_menu_text(user_row),
         reply_markup=main_menu_kb(),
@@ -929,16 +929,16 @@ async def cmd_start(message: Message) -> None:
 async def cmd_admin(message: Message) -> None:
     user_id = message.from_user.id
     username = message.from_user.username
-    
-                                                
+
+
     if not is_admin_user(user_id, username):
         await message.answer(
             "❌ У вас нет доступа к админ-панели!",
             parse_mode="HTML",
         )
         return
-    
-                             
+
+
     await message.answer(
         f"{GEAR} <b>Админ-панель</b>\n\n"
         "Добро пожаловать в админ-панель бота!",
@@ -949,11 +949,11 @@ async def cmd_admin(message: Message) -> None:
 @router.callback_query(F.data == "exit_admin")
 async def cb_exit_admin(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
-    
+
     if not is_admin_user(user_id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     user_row = get_or_create_user(user_id, callback.from_user.username)
     await callback.message.edit_text(
         build_menu_text(user_row),
@@ -978,7 +978,7 @@ async def cb_admin_back(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await callback.message.edit_text(
         f"{GEAR} <b>Админ-панель</b>\n\n"
         "Добро пожаловать в админ-панель бота!",
@@ -987,28 +987,28 @@ async def cb_admin_back(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-                                                  
+
 @router.callback_query(F.data == "admin_stats")
 async def cb_admin_stats(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     conn = db_connect()
-    
+
     users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     banned_count = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
-    
+
     total_requests = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
     pending_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'pending'").fetchone()[0]
     completed_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'completed'").fetchone()[0]
     expired_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'expired'").fetchone()[0]
-    
+
     total_deposits = conn.execute("SELECT COUNT(*) FROM deposits").fetchone()[0]
     total_amount = conn.execute("SELECT SUM(amount) FROM deposits WHERE status = 'completed'").fetchone()[0] or 0
-    
+
     conn.close()
-    
+
     await callback.message.edit_text(
         f"{FOLDER} <b>Статистика бота</b>\n"
         "―――――――――――――――――\n"
@@ -1033,7 +1033,7 @@ async def cb_admin_prices(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await callback.message.edit_text(
         f"{GEAR} <b>Управление ценами</b>\n\n"
         "Настройте параметры сервиса:",
@@ -1047,7 +1047,7 @@ async def cb_admin_edit_price(callback: CallbackQuery, state: FSMContext) -> Non
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_price)
     await callback.message.edit_text(
         f"{KEY} <b>Введите новую цену за номер</b>\n"
@@ -1064,13 +1064,13 @@ async def process_price_change(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
-    
+
     try:
         price = float(message.text.replace(",", "."))
         if price < 0:
             await message.answer("❌ Цена не может быть отрицательной!")
             return
-        
+
         set_setting("price_per_number", str(price))
         await message.answer(
             f"{CHECK} Цена за номер установлена: {price:.2f}$",
@@ -1089,7 +1089,7 @@ async def cb_admin_edit_penalty(callback: CallbackQuery, state: FSMContext) -> N
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_penalty)
     await callback.message.edit_text(
         f"{KEY} <b>Введите новый размер штрафа</b>\n"
@@ -1106,13 +1106,13 @@ async def process_penalty_change(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
-    
+
     try:
         penalty = float(message.text.replace(",", "."))
         if penalty < 0:
             await message.answer("❌ Штраф не может быть отрицательным!")
             return
-        
+
         set_setting("penalty_amount", str(penalty))
         await message.answer(
             f"{CHECK} Штраф установлен: {penalty:.2f}$",
@@ -1131,7 +1131,7 @@ async def cb_admin_edit_timeout(callback: CallbackQuery, state: FSMContext) -> N
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_timeout)
     await callback.message.edit_text(
         f"{KEY} <b>Введите новый таймаут</b>\n"
@@ -1148,17 +1148,17 @@ async def process_timeout_change(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
-    
+
     try:
         timeout = int(message.text)
         if timeout < 30:
             await message.answer("❌ Таймаут не может быть меньше 30 секунд!")
             return
-        
+
         set_setting("timeout_seconds", str(timeout))
         global REQUEST_TIMEOUT_SECONDS
         REQUEST_TIMEOUT_SECONDS = timeout
-        
+
         await message.answer(
             f"{CHECK} Таймаут установлен: {timeout} секунд",
             reply_markup=admin_prices_kb(),
@@ -1171,13 +1171,13 @@ async def process_timeout_change(message: Message, state: FSMContext) -> None:
             parse_mode="HTML",
         )
 
-                                                    
+
 @router.callback_query(F.data == "admin_broadcast")
 async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_broadcast)
     await callback.message.edit_text(
         f"{PHONE} <b>Рассылка сообщений</b>\n"
@@ -1195,19 +1195,19 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
     if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
-    
+
     text = message.text
     users = get_all_users()
-    
+
     await message.answer(
         f"{CHECK} <b>Начинаю рассылку...</b>\n"
         f"Пользователей: {len(users)}",
         parse_mode="HTML",
     )
-    
+
     success = 0
     fail = 0
-    
+
     for user in users:
         try:
             await bot.send_message(
@@ -1219,7 +1219,7 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
             await asyncio.sleep(0.1)
         except Exception:
             fail += 1
-    
+
     await message.answer(
         f"{CHECK} <b>Рассылка завершена!</b>\n"
         "―――――――――――――――――\n"
@@ -1230,13 +1230,13 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
     )
     await state.clear()
 
-                                                        
+
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await callback.message.edit_text(
         f"{USER} <b>Управление пользователями</b>\n\n"
         "Выберите действие:",
@@ -1250,16 +1250,16 @@ async def cb_admin_user_list(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     conn = db_connect()
     users = conn.execute(
         "SELECT user_id, username, balance, total_bought, is_banned FROM users ORDER BY balance DESC LIMIT 50"
     ).fetchall()
     conn.close()
-    
+
     text = f"{USER} <b>Список пользователей (топ 50)</b>\n"
     text += "―――――――――――――――――\n"
-    
+
     for i, user in enumerate(users, 1):
         status = "🔴 Забанен" if user["is_banned"] else "🟢 Активен"
         text += (
@@ -1267,7 +1267,7 @@ async def cb_admin_user_list(callback: CallbackQuery) -> None:
             f"   💰 {user['balance']:.2f}$ | 📱 {user['total_bought']}\n"
             f"   {status}\n\n"
         )
-    
+
     await callback.message.edit_text(
         text,
         reply_markup=admin_users_kb(),
@@ -1280,7 +1280,7 @@ async def cb_admin_ban_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_ban)
     await callback.message.edit_text(
         f"{CROSS} <b>Бан пользователя</b>\n"
@@ -1297,7 +1297,7 @@ async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> Non
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
-    
+
     await state.set_state(AdminStates.waiting_unban)
     await callback.message.edit_text(
         f"{CHECK} <b>Разбан пользователя</b>\n"
@@ -1309,18 +1309,18 @@ async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> Non
     )
     await callback.answer()
 
-                                                                           
-                                                             
+
+
 @router.message(StateFilter(AdminStates.waiting_ban, AdminStates.waiting_unban))
 async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         return
-    
+
     current_state = await state.get_state()
-    
+
     try:
         user_id = int(message.text.strip())
-        
+
         if current_state == "AdminStates:waiting_ban":
             ban_user(user_id)
             await message.answer(
@@ -1329,7 +1329,7 @@ async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
                 parse_mode="HTML",
             )
             await state.clear()
-        
+
         elif current_state == "AdminStates:waiting_unban":
             unban_user(user_id)
             await message.answer(
@@ -1338,22 +1338,22 @@ async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
                 parse_mode="HTML",
             )
             await state.clear()
-            
+
     except ValueError:
         await message.answer(
             "❌ Введите корректный ID пользователя (только цифры)",
             parse_mode="HTML",
         )
 
-                                                        
+
 @router.callback_query(F.data == "balance")
 async def cb_balance(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
-    
+
     if is_user_banned(user_id):
         await callback.answer("Вы забанены!", show_alert=True)
         return
-    
+
     user_row = get_or_create_user(user_id, callback.from_user.username)
     await callback.message.edit_text(
         build_balance_text(user_row),
@@ -1394,19 +1394,19 @@ async def cb_back_to_deposit(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-                                                
+
 @router.callback_query(F.data.startswith("deposit_amount:"))
 async def cb_deposit_amount(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
-    
+
     if is_user_banned(user_id):
         await callback.answer("Вы забанены!", show_alert=True)
         return
-    
+
     amount = float(callback.data.split(":")[1])
-    
+
     invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
-    
+
     if not invoice:
         await callback.message.edit_text(
             "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
@@ -1415,9 +1415,9 @@ async def cb_deposit_amount(callback: CallbackQuery) -> None:
         )
         await callback.answer()
         return
-    
+
     deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
-    
+
     await callback.message.edit_text(
         build_deposit_text(amount, invoice, deposit_id),
         reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
@@ -1449,11 +1449,11 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
                 parse_mode="HTML",
             )
             return
-        
+
         user_id = message.from_user.id
-        
+
         invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
-        
+
         if not invoice:
             await message.answer(
                 "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
@@ -1462,16 +1462,16 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
             )
             await state.clear()
             return
-        
+
         deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
-        
+
         await message.answer(
             build_deposit_text(amount, invoice, deposit_id),
             reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
             parse_mode="HTML",
         )
         await state.clear()
-        
+
     except ValueError:
         await message.answer(
             "❌ Пожалуйста, введите корректное число (например: 7, 15, 30)",
@@ -1482,38 +1482,38 @@ async def process_custom_amount(message: Message, state: FSMContext) -> None:
 async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     deposit_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
-    
+
     deposit = get_deposit_by_id(deposit_id)
-    
+
     if deposit is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    
+
     if deposit["user_id"] != user_id:
         await callback.answer("Это не ваша заявка", show_alert=True)
         return
-    
+
     if deposit["status"] != "pending":
         await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
-    
+
     invoice_status = await crypto_api.get_invoice_status(deposit["invoice_id"])
-    
+
     if not invoice_status:
         await callback.answer("Ошибка проверки статуса. Попробуйте позже.", show_alert=True)
         return
-    
+
     if invoice_status.get("status") == "paid":
         new_balance = adjust_balance(user_id, deposit["amount"])
         update_deposit_status(deposit["invoice_id"], "completed")
-        
+
         await callback.message.edit_text(
             build_deposit_success_text(deposit["amount"], new_balance),
             reply_markup=back_kb(),
             parse_mode="HTML",
         )
         await callback.answer("✅ Оплата подтверждена!")
-        
+
         await bot.send_message(
             ADMIN_CHAT_ID,
             f"{MONEY} <b>Пополнение баланса</b>\n"
@@ -1525,21 +1525,21 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     else:
         await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
-                                                                                      
+
 @router.callback_query(F.data == "get_number")
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
-    
-                   
+
+
     if is_user_banned(user_id):
         await callback.answer("❌ Вы забанены!", show_alert=True)
         return
-    
-                                                     
+
+
     user_row = get_or_create_user(user_id, callback.from_user.username)
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
-    
-                      
+
+
     if user_row["balance"] < price:
         await callback.message.edit_text(
             build_insufficient_balance_text(user_row["balance"], price),
@@ -1548,8 +1548,8 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
         )
         await callback.answer()
         return
-    
-                                             
+
+
     user = callback.from_user
     req_id = create_request(user.id, user.username)
 
@@ -1583,13 +1583,13 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
-                                                        
+
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
     penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
     timeout = int(get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS)
-    
+
     await callback.message.edit_text(
         f"{GEAR} <b>Правила пользования сервисом</b>\n\n"
         f"1. Стоимость номера: {price:.2f}$\n"
@@ -1621,7 +1621,7 @@ async def cb_support(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-                                                               
+
 @router.callback_query(F.data.startswith("usercancel:"))
 async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
@@ -1715,11 +1715,11 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
         return
 
     phone_number = message.text.strip()
-    
+
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
 
-                                                                       
-                                                       
+
+
     current_row = get_or_create_user(req["user_id"], req["username"])
     if current_row["balance"] < price:
         await message.answer(
@@ -1729,7 +1729,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
         return
 
     new_balance = adjust_balance(req["user_id"], -price)
-    
+
     update_request(
         req_id,
         status="issued",
@@ -1908,7 +1908,7 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
     start_admin_timer(bot, req_id)
     await callback.answer()
 
-                                            
+
 async def main() -> None:
     init_db()
     bot = Bot(token=BOT_TOKEN)
