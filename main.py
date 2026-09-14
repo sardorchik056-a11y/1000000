@@ -88,6 +88,8 @@ class AdminStates(StatesGroup):
     waiting_ban = State()
     waiting_unban = State()
     waiting_channel = State()
+    waiting_balance_user = State()
+    waiting_balance_amount = State()
 
 class DepositStates(StatesGroup):
     waiting_custom_amount = State()
@@ -452,6 +454,12 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="👥 Пользователи",
                     callback_data="admin_users"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💰 Выдать баланс",
+                    callback_data="admin_give_balance"
                 )
             ],
             [
@@ -1586,6 +1594,145 @@ async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
             "❌ Введите корректный ID пользователя (только цифры)",
             parse_mode="HTML",
         )
+
+
+@router.callback_query(F.data == "admin_give_balance")
+async def cb_admin_give_balance(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_balance_user)
+    await callback.message.edit_text(
+        f"{MONEY} <b>Выдача баланса</b>\n"
+        "―――――――――――――――――\n"
+        "Введите ID пользователя или его @username:\n\n"
+        "Пример: 123456789 или @username",
+        reply_markup=admin_back_kb("admin_back"),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminStates.waiting_balance_user), F.chat.id == ADMIN_CHAT_ID)
+async def process_balance_user(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer(
+            "❌ Введите ID пользователя или @username:",
+            reply_markup=admin_back_kb("admin_back"),
+        )
+        return
+
+    conn = db_connect()
+    if raw.startswith("@"):
+        row = conn.execute(
+            "SELECT * FROM users WHERE LOWER(username) = ?", (raw[1:].lower(),)
+        ).fetchone()
+    else:
+        try:
+            target_id = int(raw)
+        except ValueError:
+            conn.close()
+            await message.answer(
+                "❌ Некорректный формат. Введите числовой ID или @username:",
+                reply_markup=admin_back_kb("admin_back"),
+            )
+            return
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_id,)).fetchone()
+    conn.close()
+
+    if row is None:
+        await message.answer(
+            f"{CROSS} Пользователь не найден в базе. "
+            "Он должен хотя бы раз запустить бота (/start). Попробуйте снова:",
+            reply_markup=admin_back_kb("admin_back"),
+            parse_mode="HTML",
+        )
+        return
+
+    await state.update_data(
+        target_user_id=row["user_id"],
+        target_username=row["username"],
+    )
+    await state.set_state(AdminStates.waiting_balance_amount)
+
+    await message.answer(
+        f"{USER} Пользователь: @{row['username'] or row['user_id']}\n"
+        f"{MONEY} Текущий баланс: {row['balance']:.2f}$\n\n"
+        "Введите сумму для начисления. Чтобы списать — укажите знак «-» "
+        "(например: 5, 2.5, -3):",
+        reply_markup=admin_back_kb("admin_back"),
+        parse_mode="HTML",
+    )
+
+
+@router.message(StateFilter(AdminStates.waiting_balance_amount), F.chat.id == ADMIN_CHAT_ID)
+async def process_balance_amount(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+
+    if target_user_id is None:
+        await message.answer("Сессия истекла, начните заново через меню.")
+        await state.clear()
+        return
+
+    raw_amount = (message.text or "").strip().replace(",", ".")
+    try:
+        amount = float(raw_amount)
+    except ValueError:
+        await message.answer(
+            f"{CROSS} Некорректная сумма. Введите число, например: 5 или -2.5",
+            reply_markup=admin_back_kb("admin_back"),
+        )
+        return
+
+    if amount == 0:
+        await message.answer(
+            f"{CROSS} Сумма не может быть равна нулю. Введите другое значение:",
+            reply_markup=admin_back_kb("admin_back"),
+        )
+        return
+
+    # Пользователь мог поменять username между шагами — берём актуальные данные
+    conn = db_connect()
+    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_user_id,)).fetchone()
+    conn.close()
+
+    if row is None:
+        await message.answer(f"{CROSS} Пользователь больше не найден в базе.")
+        await state.clear()
+        return
+
+    new_balance = adjust_balance(target_user_id, amount)
+    username = row["username"]
+
+    sign = "+" if amount > 0 else ""
+    await message.answer(
+        f"{CHECK} Баланс @{username or target_user_id} изменён на {sign}{amount:.2f}$\n"
+        f"Новый баланс: {new_balance:.2f}$",
+        reply_markup=admin_menu_kb(),
+        parse_mode="HTML",
+    )
+
+    try:
+        if amount > 0:
+            user_text = (
+                f"{MONEY} <b>Ваш баланс пополнен администратором на {amount:.2f}$</b>\n"
+                f"Текущий баланс: {new_balance:.2f}$"
+            )
+        else:
+            user_text = (
+                f"{MONEY} <b>С вашего баланса списано {abs(amount):.2f}$</b>\n"
+                f"Текущий баланс: {new_balance:.2f}$"
+            )
+        await bot.send_message(target_user_id, user_text, parse_mode="HTML")
+    except Exception:
+        logging.exception(
+            f"Не удалось уведомить пользователя {target_user_id} об изменении баланса"
+        )
+
+    await state.clear()
 
 
 @router.callback_query(F.data == "balance")
