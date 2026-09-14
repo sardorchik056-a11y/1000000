@@ -18,14 +18,14 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-# ================= НАСТРОЙКИ =================
+                                               
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
 
 SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "DATROQ"  # ваш юзернейм
+SUPPORT_USERNAME = "DATROQ"                
 
-ADMIN_USERNAME = "DATROQ"  # юзернейм админа
-ADMIN_CHAT_ID = 8118184388  # ID админа (ваш ID)
+ADMIN_USERNAME = "DATROQ"                   
+ADMIN_CHAT_ID = 8118184388                      
 
 REQUEST_TIMEOUT_SECONDS = 3 * 60
 PENALTY_AMOUNT = 0.5
@@ -33,7 +33,7 @@ PRICE_PER_NUMBER = 1.0
 DB_PATH = "shop.db"
 MIN_DEPOSIT = 1
 
-# ================= НАСТРОЙКИ CRYPTOBOT API =================
+                                                             
 CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 PAY_ASSET = "USDT"
@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO)
 router = Router()
 active_timers: dict[int, asyncio.Task] = {}
 
-# ================= КАСТОМНЫЕ ТЕЛЕГРАМ ПРЕМИУМ ЭМОДЗИ =================
+                                                                       
 EMOJI_STAR_ID = "5906581476639513176"
 EMOJI_SMALL_STAR_ID = "5445353829304387411"
 EMOJI_SMALL_STAR_2_ID = "6078158956188930337"
@@ -77,7 +77,7 @@ CHECK = ce(EMOJI_CHECK_ID, "✔️")
 KEY = ce(EMOJI_KEY_ID, "🔑")
 GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
 
-# ================= FSM СОСТОЯНИЯ =================
+                                                   
 class AdminStates(StatesGroup):
     waiting_number = State()
     waiting_code = State()
@@ -91,27 +91,26 @@ class AdminStates(StatesGroup):
 class DepositStates(StatesGroup):
     waiting_custom_amount = State()
 
-# ================= БАЗА ДАННЫХ С МИГРАЦИЕЙ =================
+                                                             
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def migrate_database() -> None:
-    """Миграция базы данных - добавление недостающих колонок"""
     conn = db_connect()
     cursor = conn.cursor()
     
-    # Проверяем таблицу users
+                             
     cursor.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in cursor.fetchall()]
     
-    # Добавляем колонку is_banned если её нет
+                                             
     if 'is_banned' not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT 0")
         logging.info("✅ Колонка is_banned добавлена в таблицу users")
     
-    # Добавляем колонку completed_at в таблицу requests если её нет
+                                                                   
     cursor.execute("PRAGMA table_info(requests)")
     req_columns = [column[1] for column in cursor.fetchall()]
     if 'completed_at' not in req_columns:
@@ -124,7 +123,7 @@ def migrate_database() -> None:
 def init_db() -> None:
     conn = db_connect()
     
-    # Таблица пользователей
+                           
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -138,7 +137,7 @@ def init_db() -> None:
         """
     )
     
-    # Таблица заявок
+                    
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS requests (
@@ -159,7 +158,7 @@ def init_db() -> None:
         """
     )
     
-    # Таблица депозитов
+                       
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS deposits (
@@ -174,7 +173,7 @@ def init_db() -> None:
         """
     )
     
-    # Таблица настроек
+                      
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS settings (
@@ -184,7 +183,7 @@ def init_db() -> None:
         """
     )
     
-    # Добавляем настройки по умолчанию
+                                      
     settings = [
         ("price_per_number", str(PRICE_PER_NUMBER)),
         ("penalty_amount", str(PENALTY_AMOUNT)),
@@ -200,7 +199,7 @@ def init_db() -> None:
     conn.commit()
     conn.close()
     
-    # Запускаем миграцию
+                        
     migrate_database()
 
 def get_setting(key: str) -> str:
@@ -339,14 +338,13 @@ def is_user_banned(user_id: int) -> bool:
     return row["is_banned"] == 1 if row else False
 
 def is_admin_user(user_id: int, username: str = None) -> bool:
-    """Проверка является ли пользователь админом по ID или юзернейму"""
     if user_id == ADMIN_CHAT_ID:
         return True
     if username and username.lower() == ADMIN_USERNAME.lower():
         return True
     return False
 
-# ================= CRYPTOBOT API =================
+                                                   
 class CryptoBotAPI:
     def __init__(self, token: str):
         self.token = token
@@ -393,7 +391,7 @@ class CryptoBotAPI:
 
 crypto_api = CryptoBotAPI(CRYPTOBOT_API_TOKEN)
 
-# ================= КЛАВИАТУРЫ =================
+                                                
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -544,7 +542,6 @@ def back_kb() -> InlineKeyboardMarkup:
     )
 
 def admin_back_kb(target: str) -> InlineKeyboardMarkup:
-    """Кнопка «Назад», ведущая в конкретный раздел админ-панели, а не в пользовательское меню."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -731,7 +728,7 @@ def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-# ================= ТЕКСТЫ =================
+                                            
 def build_menu_text(user_row: sqlite3.Row) -> str:
     username = user_row["username"] or "—"
     return (
@@ -803,7 +800,7 @@ def build_insufficient_balance_text(balance: float, price: float) -> str:
         "Пополните баланс через раздел <b>«Баланс»</b> в меню."
     )
 
-# ================= ТАЙМЕРЫ =================
+                                             
 async def schedule_timeout(bot: Bot, req_id: int) -> None:
     try:
         penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
@@ -906,12 +903,12 @@ def cancel_timer(req_id: int) -> None:
 def is_admin_chat(chat_id: int) -> bool:
     return chat_id == ADMIN_CHAT_ID
 
-# ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
+                                                               
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     user_id = message.from_user.id
     
-    # Проверка бана
+                   
     if is_user_banned(user_id):
         await message.answer(
             "❌ Вы забанены в боте. Обратитесь к администратору @DATROQ.",
@@ -921,7 +918,7 @@ async def cmd_start(message: Message) -> None:
     
     user_row = get_or_create_user(message.from_user.id, message.from_user.username)
     
-    # Всегда показываем простое меню для всех пользователей
+                                                           
     await message.answer(
         build_menu_text(user_row),
         reply_markup=main_menu_kb(),
@@ -933,7 +930,7 @@ async def cmd_admin(message: Message) -> None:
     user_id = message.from_user.id
     username = message.from_user.username
     
-    # Проверяем является ли пользователь админом
+                                                
     if not is_admin_user(user_id, username):
         await message.answer(
             "❌ У вас нет доступа к админ-панели!",
@@ -941,7 +938,7 @@ async def cmd_admin(message: Message) -> None:
         )
         return
     
-    # Показываем админ-панель
+                             
     await message.answer(
         f"{GEAR} <b>Админ-панель</b>\n\n"
         "Добро пожаловать в админ-панель бота!",
@@ -990,7 +987,7 @@ async def cb_admin_back(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-# ================= АДМИН-ПАНЕЛЬ =================
+                                                  
 @router.callback_query(F.data == "admin_stats")
 async def cb_admin_stats(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
@@ -1174,7 +1171,7 @@ async def process_timeout_change(message: Message, state: FSMContext) -> None:
             parse_mode="HTML",
         )
 
-# ================= АДМИН-РАССЫЛКА =================
+                                                    
 @router.callback_query(F.data == "admin_broadcast")
 async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
@@ -1233,7 +1230,7 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> No
     )
     await state.clear()
 
-# ================= АДМИН-ПОЛЬЗОВАТЕЛИ =================
+                                                        
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(callback: CallbackQuery) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
@@ -1312,8 +1309,8 @@ async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> Non
     )
     await callback.answer()
 
-# Обработчик для бана/разбана — теперь ограничен только своими состояниями,
-# чтобы не перехватывать ввод номера/кода в других сценариях.
+                                                                           
+                                                             
 @router.message(StateFilter(AdminStates.waiting_ban, AdminStates.waiting_unban))
 async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
@@ -1348,7 +1345,7 @@ async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
             parse_mode="HTML",
         )
 
-# ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
+                                                        
 @router.callback_query(F.data == "balance")
 async def cb_balance(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
@@ -1397,7 +1394,7 @@ async def cb_back_to_deposit(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-# ================= ПОПОЛНЕНИЕ =================
+                                                
 @router.callback_query(F.data.startswith("deposit_amount:"))
 async def cb_deposit_amount(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
@@ -1528,21 +1525,21 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
     else:
         await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
-# ================= ОСНОВНОЙ ХЕНДЛЕР ВЗЯТЬ НОМЕР С ПРОВЕРКОЙ БАЛАНСА =================
+                                                                                      
 @router.callback_query(F.data == "get_number")
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
     
-    # Проверка бана
+                   
     if is_user_banned(user_id):
         await callback.answer("❌ Вы забанены!", show_alert=True)
         return
     
-    # Получаем данные пользователя и проверяем баланс
+                                                     
     user_row = get_or_create_user(user_id, callback.from_user.username)
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
     
-    # Проверка баланса
+                      
     if user_row["balance"] < price:
         await callback.message.edit_text(
             build_insufficient_balance_text(user_row["balance"], price),
@@ -1552,7 +1549,7 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer()
         return
     
-    # Если баланс достаточен - создаем заявку
+                                             
     user = callback.from_user
     req_id = create_request(user.id, user.username)
 
@@ -1586,7 +1583,7 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
-# ================= ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =================
+                                                        
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
@@ -1624,7 +1621,7 @@ async def cb_support(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-# ================= АДМИНСКИЕ ХЕНДЛЕРЫ ЗАЯВОК =================
+                                                               
 @router.callback_query(F.data.startswith("usercancel:"))
 async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
     req_id = int(callback.data.split(":")[1])
@@ -1721,8 +1718,8 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
     
     price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
 
-    # Сначала проверяем баланс — списываем только если хватает средств,
-    # чтобы не увести баланс в минус без выдачи номера.
+                                                                       
+                                                       
     current_row = get_or_create_user(req["user_id"], req["username"])
     if current_row["balance"] < price:
         await message.answer(
@@ -1911,7 +1908,7 @@ async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
     start_admin_timer(bot, req_id)
     await callback.answer()
 
-# ================= ЗАПУСК =================
+                                            
 async def main() -> None:
     init_db()
     bot = Bot(token=BOT_TOKEN)
