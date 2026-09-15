@@ -58,6 +58,9 @@ EMOJI_PHONE_2_ID = "5104966345267610825"
 EMOJI_CHECK_ID = "5206607081334906820"
 EMOJI_KEY_ID = "5307843983102204243"
 EMOJI_GLOBE_ID = "5447410659077661506"
+EMOJI_REFERRAL_ID = "5258362837411045098"
+
+REFERRAL_PERCENT = 7.0
 
 def ce(emoji_id: str, fallback: str = "⭐") -> str:
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
@@ -76,12 +79,26 @@ PHONE_2 = ce(EMOJI_PHONE_2_ID, "📞")
 CHECK = ce(EMOJI_CHECK_ID, "✔️")
 KEY = ce(EMOJI_KEY_ID, "🔑")
 GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
+REFERRAL = ce(EMOJI_REFERRAL_ID, "👤")
+
+NUMBER_TYPE_LABELS = {
+    "reg": "Регистрация",
+    "nereg": "Без регистрации",
+}
+
+def number_type_label(number_type: str | None) -> str:
+    return NUMBER_TYPE_LABELS.get(number_type or "reg", "Регистрация")
+
+def get_number_price(number_type: str | None) -> float:
+    setting_key = "price_nereg" if number_type == "nereg" else "price_reg"
+    return float(get_setting(setting_key) or PRICE_PER_NUMBER)
 
 
 class AdminStates(StatesGroup):
     waiting_number = State()
     waiting_code = State()
-    waiting_price = State()
+    waiting_price_reg = State()
+    waiting_price_nereg = State()
     waiting_penalty = State()
     waiting_timeout = State()
     waiting_broadcast = State()
@@ -113,12 +130,24 @@ def migrate_database() -> None:
         cursor.execute("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT 0")
         logging.info("✅ Колонка is_banned добавлена в таблицу users")
 
+    if 'referred_by' not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        logging.info("✅ Колонка referred_by добавлена в таблицу users")
+
+    if 'referral_earned' not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN referral_earned REAL DEFAULT 0")
+        logging.info("✅ Колонка referral_earned добавлена в таблицу users")
+
 
     cursor.execute("PRAGMA table_info(requests)")
     req_columns = [column[1] for column in cursor.fetchall()]
     if 'completed_at' not in req_columns:
         cursor.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
         logging.info("✅ Колонка completed_at добавлена в таблицу requests")
+
+    if 'number_type' not in req_columns:
+        cursor.execute("ALTER TABLE requests ADD COLUMN number_type TEXT DEFAULT 'reg'")
+        logging.info("✅ Колонка number_type добавлена в таблицу requests")
 
     conn.commit()
     conn.close()
@@ -135,7 +164,9 @@ def init_db() -> None:
             balance REAL DEFAULT 0,
             total_bought INTEGER DEFAULT 0,
             created_at TEXT,
-            is_banned BOOLEAN DEFAULT 0
+            is_banned BOOLEAN DEFAULT 0,
+            referred_by INTEGER,
+            referral_earned REAL DEFAULT 0
         )
         """
     )
@@ -150,6 +181,7 @@ def init_db() -> None:
             status TEXT DEFAULT 'pending',
             phone_number TEXT,
             sms_code TEXT,
+            number_type TEXT DEFAULT 'reg',
             user_msg_chat_id INTEGER,
             user_msg_id INTEGER,
             admin_msg_chat_id INTEGER,
@@ -187,8 +219,14 @@ def init_db() -> None:
     )
 
 
+    old_price_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'price_per_number'"
+    ).fetchone()
+    old_price = old_price_row["value"] if old_price_row else None
+
     settings = [
-        ("price_per_number", str(PRICE_PER_NUMBER)),
+        ("price_reg", old_price or str(PRICE_PER_NUMBER)),
+        ("price_nereg", old_price or str(PRICE_PER_NUMBER)),
         ("penalty_amount", str(PENALTY_AMOUNT)),
         ("timeout_seconds", str(REQUEST_TIMEOUT_SECONDS)),
     ]
@@ -240,16 +278,61 @@ def get_or_create_user(user_id: int, username: str | None) -> sqlite3.Row:
     conn.close()
     return row
 
-def create_request(user_id: int, username: str | None) -> int:
+def create_request(user_id: int, username: str | None, number_type: str = "reg") -> int:
     conn = db_connect()
     cur = conn.execute(
-        "INSERT INTO requests (user_id, username, status, created_at) VALUES (?, ?, 'pending', ?)",
-        (user_id, username, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO requests (user_id, username, status, number_type, created_at) "
+        "VALUES (?, ?, 'pending', ?, ?)",
+        (user_id, username, number_type, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     req_id = cur.lastrowid
     conn.close()
     return req_id
+
+def get_user_by_id(user_id: int) -> sqlite3.Row | None:
+    conn = db_connect()
+    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row
+
+def set_referrer(user_id: int, referrer_id: int) -> None:
+    conn = db_connect()
+    conn.execute(
+        "UPDATE users SET referred_by = ? WHERE user_id = ? AND referred_by IS NULL",
+        (referrer_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def count_referrals(user_id: int) -> int:
+    conn = db_connect()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)
+    ).fetchone()[0]
+    conn.close()
+    return count
+
+def add_referral_earning(user_id: int, amount: float) -> float:
+    conn = db_connect()
+    conn.execute(
+        "UPDATE users SET balance = balance + ?, referral_earned = referral_earned + ? WHERE user_id = ?",
+        (amount, amount, user_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row["balance"] if row else 0.0
+
+
+_bot_username_cache: str | None = None
+
+async def get_bot_username(bot: Bot) -> str:
+    global _bot_username_cache
+    if _bot_username_cache is None:
+        me = await bot.get_me()
+        _bot_username_cache = me.username
+    return _bot_username_cache
 
 def get_request(req_id: int) -> sqlite3.Row | None:
     conn = db_connect()
@@ -396,13 +479,22 @@ crypto_api = CryptoBotAPI(CRYPTOBOT_API_TOKEN)
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
+    price_reg = get_number_price("reg")
+    price_nereg = get_number_price("nereg")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Взять номер",
-                    callback_data="get_number",
+                    text=f"📲 Номер (Рег) — {price_reg:.2f}$",
+                    callback_data="get_number:reg",
                     icon_custom_emoji_id=EMOJI_PHONE_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"📵 Номер (Нерег) — {price_nereg:.2f}$",
+                    callback_data="get_number:nereg",
+                    icon_custom_emoji_id=EMOJI_PHONE_2_ID
                 )
             ],
             [
@@ -410,6 +502,13 @@ def main_menu_kb() -> InlineKeyboardMarkup:
                     text="Баланс",
                     callback_data="balance",
                     icon_custom_emoji_id=EMOJI_MONEY_ID
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Рефералы",
+                    callback_data="referrals",
+                    icon_custom_emoji_id=EMOJI_REFERRAL_ID
                 )
             ],
             [
@@ -529,7 +628,8 @@ def subscription_required_kb(channel: str) -> InlineKeyboardMarkup:
     )
 
 def admin_prices_kb() -> InlineKeyboardMarkup:
-    price = get_setting("price_per_number") or PRICE_PER_NUMBER
+    price_reg = get_number_price("reg")
+    price_nereg = get_number_price("nereg")
     penalty = get_setting("penalty_amount") or PENALTY_AMOUNT
     timeout = get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS
 
@@ -537,8 +637,14 @@ def admin_prices_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Цена номера: {price}$",
-                    callback_data="admin_edit_price"
+                    text=f"📲 Цена Рег: {price_reg:.2f}$",
+                    callback_data="admin_edit_price_reg"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"📵 Цена Нерег: {price_nereg:.2f}$",
+                    callback_data="admin_edit_price_nereg"
                 )
             ],
             [
@@ -846,11 +952,12 @@ def build_waiting_admin_text(req: sqlite3.Row) -> str:
     )
 
 def build_issued_text(req: sqlite3.Row) -> str:
-    price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
+    price = get_number_price(req["number_type"])
     return (
         f"{CHECK} <b>Номер получен!</b>\n"
         "―――――――――――――――――\n"
         f"┣ Номер: <code>{req['phone_number']}</code>\n"
+        f"┣ Тип: {number_type_label(req['number_type'])}\n"
         "┣ Формат: СМС\n"
         f"┗ {MONEY} Стоимость: {price:.2f}$\n\n"
         "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
@@ -896,6 +1003,22 @@ def build_insufficient_balance_text(balance: float, price: float) -> str:
         f"📱 Стоимость номера: {price:.2f}$\n"
         f"❌ Не хватает: {(price - balance):.2f}$\n\n"
         "Пополните баланс через раздел <b>«Баланс»</b> в меню."
+    )
+
+def build_referral_text(user_row: sqlite3.Row, referrals_count: int, ref_link: str) -> str:
+    earned = user_row["referral_earned"] or 0
+    return (
+        f"{REFERRAL} <b>Реферальная программа</b>\n"
+        "―――――――――――――――――\n"
+        f"Приглашайте друзей и получайте <b>{REFERRAL_PERCENT:.0f}%</b> "
+        "с каждого их пополнения баланса — автоматически и навсегда.\n"
+        "―――――――――――――――――\n"
+        f"👥 Приглашено рефералов: <b>{referrals_count}</b>\n"
+        f"{MONEY} Заработано с рефералов: <b>{earned:.2f}$</b>\n"
+        "―――――――――――――――――\n\n"
+        f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+        "Отправьте её друзьям — как только они пополнят баланс, "
+        f"вы сразу получите {REFERRAL_PERCENT:.0f}% от суммы пополнения к себе на счёт."
     )
 
 
@@ -1036,8 +1159,30 @@ async def cmd_start(message: Message, bot: Bot) -> None:
             )
             return
 
+    is_new_user = get_user_by_id(user_id) is None
     user_row = get_or_create_user(message.from_user.id, message.from_user.username)
 
+    if is_new_user:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].startswith("ref_"):
+            referrer_id_raw = parts[1][len("ref_"):]
+            try:
+                referrer_id = int(referrer_id_raw)
+            except ValueError:
+                referrer_id = None
+
+            if referrer_id and referrer_id != user_id and get_user_by_id(referrer_id):
+                set_referrer(user_id, referrer_id)
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        f"{REFERRAL} <b>У вас новый реферал!</b>\n"
+                        f"@{message.from_user.username or user_id} присоединился по вашей ссылке.\n"
+                        f"Вы будете получать {REFERRAL_PERCENT:.0f}% с каждого его пополнения.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logging.exception(f"Не удалось уведомить реферера {referrer_id} о новом реферале")
 
     await message.answer(
         build_menu_text(user_row),
@@ -1162,25 +1307,25 @@ async def cb_admin_prices(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-@router.callback_query(F.data == "admin_edit_price")
-async def cb_admin_edit_price(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_edit_price_reg")
+async def cb_admin_edit_price_reg(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_user(callback.from_user.id, callback.from_user.username):
         await callback.answer("Недоступно", show_alert=True)
         return
 
-    await state.set_state(AdminStates.waiting_price)
+    await state.set_state(AdminStates.waiting_price_reg)
     await callback.message.edit_text(
-        f"{KEY} <b>Введите новую цену за номер</b>\n"
+        f"{KEY} <b>Введите новую цену за Рег-номер</b>\n"
         "―――――――――――――――――\n"
-        f"Текущая цена: {get_setting('price_per_number') or PRICE_PER_NUMBER}$\n\n"
+        f"Текущая цена: {get_number_price('reg'):.2f}$\n\n"
         "Введите цену цифрами (например: 1.5, 2, 3.25):",
         reply_markup=admin_back_kb("admin_prices"),
         parse_mode="HTML",
     )
     await callback.answer()
 
-@router.message(AdminStates.waiting_price)
-async def process_price_change(message: Message, state: FSMContext) -> None:
+@router.message(AdminStates.waiting_price_reg)
+async def process_price_reg_change(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         await message.answer("Недоступно")
         return
@@ -1191,9 +1336,51 @@ async def process_price_change(message: Message, state: FSMContext) -> None:
             await message.answer("❌ Цена не может быть отрицательной!")
             return
 
-        set_setting("price_per_number", str(price))
+        set_setting("price_reg", str(price))
         await message.answer(
-            f"{CHECK} Цена за номер установлена: {price:.2f}$",
+            f"{CHECK} Цена за Рег-номер установлена: {price:.2f}$",
+            reply_markup=admin_prices_kb(),
+            parse_mode="HTML",
+        )
+        await state.clear()
+    except ValueError:
+        await message.answer(
+            "❌ Введите корректное число (например: 1.5, 2, 3.25)",
+            parse_mode="HTML",
+        )
+
+@router.callback_query(F.data == "admin_edit_price_nereg")
+async def cb_admin_edit_price_nereg(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_user(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_price_nereg)
+    await callback.message.edit_text(
+        f"{KEY} <b>Введите новую цену за Нерег-номер</b>\n"
+        "―――――――――――――――――\n"
+        f"Текущая цена: {get_number_price('nereg'):.2f}$\n\n"
+        "Введите цену цифрами (например: 1.5, 2, 3.25):",
+        reply_markup=admin_back_kb("admin_prices"),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_price_nereg)
+async def process_price_nereg_change(message: Message, state: FSMContext) -> None:
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await message.answer("Недоступно")
+        return
+
+    try:
+        price = float(message.text.replace(",", "."))
+        if price < 0:
+            await message.answer("❌ Цена не может быть отрицательной!")
+            return
+
+        set_setting("price_nereg", str(price))
+        await message.answer(
+            f"{CHECK} Цена за Нерег-номер установлена: {price:.2f}$",
             reply_markup=admin_prices_kb(),
             parse_mode="HTML",
         )
@@ -1751,6 +1938,26 @@ async def cb_balance(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
+@router.callback_query(F.data == "referrals")
+async def cb_referrals(callback: CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+
+    if is_user_banned(user_id):
+        await callback.answer("Вы забанены!", show_alert=True)
+        return
+
+    user_row = get_or_create_user(user_id, callback.from_user.username)
+    referrals_count = count_referrals(user_id)
+    bot_username = await get_bot_username(bot)
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+    await callback.message.edit_text(
+        build_referral_text(user_row, referrals_count, ref_link),
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
 @router.callback_query(F.data == "deposit")
 async def cb_deposit(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
@@ -1903,6 +2110,27 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
         )
         await callback.answer("✅ Оплата подтверждена!")
 
+        depositor = get_user_by_id(user_id)
+        if depositor and depositor["referred_by"]:
+            referrer_id = depositor["referred_by"]
+            reward = round(deposit["amount"] * REFERRAL_PERCENT / 100, 2)
+            if reward > 0:
+                add_referral_earning(referrer_id, reward)
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        f"{REFERRAL} <b>Реферальный бонус!</b>\n"
+                        f"―――――――――――――――――\n"
+                        f"Ваш реферал @{callback.from_user.username or user_id} "
+                        f"пополнил баланс на {deposit['amount']:.2f}$\n"
+                        f"{MONEY} Вам начислено: <b>{reward:.2f}$</b> ({REFERRAL_PERCENT:.0f}%)",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logging.exception(
+                        f"Не удалось уведомить реферера {referrer_id} о реферальном бонусе"
+                    )
+
         try:
             await bot.send_message(
                 ADMIN_CHAT_ID,
@@ -1920,7 +2148,7 @@ async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
 
 
-@router.callback_query(F.data == "get_number")
+@router.callback_query(F.data.startswith("get_number:"))
 async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
 
@@ -1929,9 +2157,12 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("❌ Вы забанены!", show_alert=True)
         return
 
+    number_type = callback.data.split(":", 1)[1]
+    if number_type not in ("reg", "nereg"):
+        number_type = "reg"
 
     user_row = get_or_create_user(user_id, callback.from_user.username)
-    price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
+    price = get_number_price(number_type)
 
 
     if user_row["balance"] < price:
@@ -1945,10 +2176,11 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
 
     user = callback.from_user
-    req_id = create_request(user.id, user.username)
+    req_id = create_request(user.id, user.username, number_type)
 
     await callback.message.edit_text(
-        f"{PHONE_2} <b>В поиске номера</b>, ожидайте в течение 3 минут",
+        f"{PHONE_2} <b>В поиске номера ({number_type_label(number_type)})</b>, "
+        "ожидайте в течение 3 минут",
         reply_markup=user_searching_kb(req_id),
         parse_mode="HTML",
     )
@@ -1963,8 +2195,9 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
             admin_msg = await bot.send_message(
                 ADMIN_CHAT_ID,
                 f"🆕 <b>Новая заявка #{req_id}</b>\n"
-                f"От: @{user.username or user.id}\n"
-                f"Баланс пользователя: {user_row['balance']:.2f}$",
+                f"┣ Тип: <b>{number_type_label(number_type)}</b>\n"
+                f"┣ От: @{user.username or user.id}\n"
+                f"┗ Баланс пользователя: {user_row['balance']:.2f}$",
                 reply_markup=admin_new_request_kb(req_id),
                 parse_mode="HTML",
             )
@@ -1994,18 +2227,20 @@ async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data == "rules")
 async def cb_rules(callback: CallbackQuery) -> None:
-    price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
+    price_reg = get_number_price("reg")
+    price_nereg = get_number_price("nereg")
     penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
     timeout = int(get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS)
 
     await callback.message.edit_text(
         f"{GEAR} <b>Правила пользования сервисом</b>\n\n"
-        f"1. Стоимость номера: {price:.2f}$\n"
-        f"2. Время на получение СМС: {timeout} секунд\n"
-        f"3. Штраф за просрочку: {penalty:.2f}$\n"
-        f"4. Средства не возвращаются после успешной активации\n"
-        f"5. Запрещена перепродажа номеров третьим лицам\n"
-        f"6. При нарушении правил - бан без возврата средств",
+        f"1. Стоимость номера (Рег): {price_reg:.2f}$\n"
+        f"2. Стоимость номера (Нерег): {price_nereg:.2f}$\n"
+        f"3. Время на получение СМС: {timeout} секунд\n"
+        f"4. Штраф за просрочку: {penalty:.2f}$\n"
+        f"5. Средства не возвращаются после успешной активации\n"
+        f"6. Запрещена перепродажа номеров третьим лицам\n"
+        f"7. При нарушении правил - бан без возврата средств",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
@@ -2124,7 +2359,7 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
 
     phone_number = message.text.strip()
 
-    price = float(get_setting("price_per_number") or PRICE_PER_NUMBER)
+    price = get_number_price(req["number_type"])
 
 
 
@@ -2159,7 +2394,8 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             logging.exception("Не удалось отредактировать сообщение пользователя (issue)")
 
     await message.answer(
-        f"{CHECK} Номер <code>{phone_number}</code> выдан @{req['username'] or req['user_id']}. "
+        f"{CHECK} Номер <code>{phone_number}</code> ({number_type_label(req['number_type'])}) "
+        f"выдан @{req['username'] or req['user_id']}. "
         f"Списано: {price:.2f}$\n"
         "Жду СМС на свой телефон.\n⏳ Таймер: 3 минуты.",
         reply_markup=admin_waiting_sms_kb(req_id),
@@ -2171,7 +2407,8 @@ async def process_number_input(message: Message, state: FSMContext, bot: Bot) ->
             await bot.edit_message_text(
                 chat_id=req["admin_msg_chat_id"],
                 message_id=req["admin_msg_id"],
-                text=f"{CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> выдан. Списано: {price:.2f}$",
+                text=f"{CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> "
+                f"({number_type_label(req['number_type'])}) выдан. Списано: {price:.2f}$",
                 parse_mode="HTML",
             )
         except Exception:
