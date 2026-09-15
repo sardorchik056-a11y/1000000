@@ -485,14 +485,14 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"📲 Номер (Рег) — {price_reg:.2f}$",
+                    text=f"Номер (Рег) — {price_reg:.2f}$",
                     callback_data="get_number:reg",
                     icon_custom_emoji_id=EMOJI_PHONE_ID
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text=f"📵 Номер (Нерег) — {price_nereg:.2f}$",
+                    text=f"Номер (Нерег) — {price_nereg:.2f}$",
                     callback_data="get_number:nereg",
                     icon_custom_emoji_id=EMOJI_PHONE_2_ID
                 )
