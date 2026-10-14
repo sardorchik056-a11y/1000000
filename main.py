@@ -50,7 +50,7 @@ REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнени
 CURRENCY = "$"
 
 # ── xRocket (оплата) ───────────────────────────────────────────
-XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMwMDgzMiIsImp0aSI6ImFwcDozMDA4MzI6YzZlMTRkYWMtNzk4OC00YjU3LWFhYWQtODU1MmI5YzFmM2VkIiwiaWF0IjoxNzkxOTY5MDIxfQ.LsMEn1gMHcZOGdcMyQMoCxzt1VLSSi5NnV9yTgfb5DI")
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "034cea3212dcfe762c3dc3093")
 XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
 PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
 
