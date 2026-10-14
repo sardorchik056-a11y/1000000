@@ -1,2566 +1,1337 @@
-import asyncio
-import logging
-import os
-import sqlite3
-import aiohttp
-import json
-from datetime import datetime, timezone
+"""
+Telegram-бот: главное меню + пополнение через xRocket и CryptoBot/@send (aiogram 3.x + aiosqlite)
 
+Установка:
+    pip install -U aiogram aiosqlite aiohttp
+
+Запуск:
+    export BOT_TOKEN="123:ABC"
+    export XROCKET_API_KEY="ключ из @xrocket → Rocket Pay → Create App → API token"
+    export CRYPTOBOT_API_KEY="токен из @send (или @CryptoBot) → Crypto Pay → Create App"
+    export SUPPORT_USERNAME="your_support"     # без @
+    export SUPPORT_URL="https://t.me/your_support"   # ссылка кнопки «Тех поддержка»
+    export ADMIN_IDS="123456789"               # ID админов через запятую, панель — /admin
+    python main.py
+"""
+
+import asyncio
+import html
+import logging
+import math
+import os
+import time
+from datetime import datetime
+from urllib.parse import quote
+
+import aiohttp
+import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, StateFilter, Command
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# ══════════════════════════════════════════════════════════════
+#  НАСТРОЙКИ
+# ══════════════════════════════════════════════════════════════
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8997019153:AAGeuZuCiE_3WY5jdlKyoiwzF3h_PcD8ro4")
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
+# Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
+SUPPORT_URL = os.getenv("SUPPORT_URL", f"https://t.me/{SUPPORT_USERNAME}")
+# Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8854740379").replace(" ", "").split(",") if x.isdigit()}
+SHOP_NAME = os.getenv("SHOP_NAME", "XYLI SHOP")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
+CURRENCY = "$"
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8651956926:AAG3ML1uGBPQOgrM5WAMl3kXaRLvVxTHCsw")
+# ── xRocket (оплата) ───────────────────────────────────────────
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMwMDgzMiIsImp0aSI6ImFwcDozMDA4MzI6YzZlMTRkYWMtNzk4OC00YjU3LWFhYWQtODU1MmI5YzFmM2VkIiwiaWF0IjoxNzkxOTY5MDIxfQ.LsMEn1gMHcZOGdcMyQMoCxzt1VLSSi5NnV9yTgfb5DI")
+XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
+PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
 
-SHOP_NAME = "Kretros SMS Shop"
-SUPPORT_USERNAME = "DATROQ"
+# ── CryptoBot / @send (Crypto Pay API) ─────────────────────────
+CRYPTOBOT_API_KEY = os.getenv("CRYPTOBOT_API_KEY", "600697:AAy9p1zKJ6S5ffH51Rt9YsdPJC3HstLuZ96")
+# mainnet: https://pay.crypt.bot/api   |   testnet: https://testnet-pay.crypt.bot/api
+CRYPTOBOT_URL = os.getenv("CRYPTOBOT_URL", "https://pay.crypt.bot/api")
 
-ADMIN_USERNAME = "DATROQ"
-ADMIN_CHAT_ID = 8118184388
+# Способы пополнения: код -> название на кнопке
+PROVIDERS = {"xr": "xRocket", "cb": "CryptoBot (@send)"}
+TOPUP_AMOUNTS = [5, 10, 25, 50]  # кнопки быстрых сумм (остальное — «Другая сумма»)
+MIN_TOPUP = 1.0
+MAX_TOPUP = 1000.0
+INVOICE_TTL = 3600     # срок жизни счёта, сек
+POLL_INTERVAL = 8      # как часто проверять оплату, сек
 
-REQUEST_TIMEOUT_SECONDS = 3 * 60
-PENALTY_AMOUNT = 0.5
-PRICE_PER_NUMBER = 1.0
-DB_PATH = "shop.db"
-MIN_DEPOSIT = 1
-
-
-CRYPTOBOT_API_TOKEN = "582363:AALEf7JOugnrQyrkMHzH5UrO7pdOjjYnTQy"
-CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
-PAY_ASSET = "USDT"
-
-logging.basicConfig(level=logging.INFO)
-
-router = Router()
-active_timers: dict[int, asyncio.Task] = {}
-
-
-EMOJI_STAR_ID = "5906581476639513176"
-EMOJI_SMALL_STAR_ID = "5445353829304387411"
-EMOJI_SMALL_STAR_2_ID = "6078158956188930337"
-EMOJI_FOLDER_ID = "5877316724830768997"
-EMOJI_PHONE_ID = "5897567714674741148"
-EMOJI_GEAR_ID = "5341715473882955310"
-EMOJI_USER_ID = "5848400681416793625"
-EMOJI_MONEY_ID = "5116648080787112958"
-EMOJI_CROSS_ID = "5210952531676504517"
-EMOJI_WARNING_ID = "5440660757194744323"
-EMOJI_PHONE_2_ID = "5104966345267610825"
-EMOJI_CHECK_ID = "5206607081334906820"
-EMOJI_KEY_ID = "5307843983102204243"
-EMOJI_GLOBE_ID = "5447410659077661506"
-EMOJI_REFERRAL_ID = "5258362837411045098"
-
-REFERRAL_PERCENT = 7.0
-
-def ce(emoji_id: str, fallback: str = "⭐") -> str:
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
-
-STAR = ce(EMOJI_STAR_ID, "⭐")
-SMALL_STAR = ce(EMOJI_SMALL_STAR_ID, "⭐")
-SMALL_STAR_2 = ce(EMOJI_SMALL_STAR_2_ID, "⭐")
-FOLDER = ce(EMOJI_FOLDER_ID, "🗃")
-PHONE = ce(EMOJI_PHONE_ID, "📞")
-GEAR = ce(EMOJI_GEAR_ID, "⚙️")
-USER = ce(EMOJI_USER_ID, "👤")
-MONEY = ce(EMOJI_MONEY_ID, "💰")
-CROSS = ce(EMOJI_CROSS_ID, "❌")
-WARNING = ce(EMOJI_WARNING_ID, "‼️")
-PHONE_2 = ce(EMOJI_PHONE_2_ID, "📞")
-CHECK = ce(EMOJI_CHECK_ID, "✔️")
-KEY = ce(EMOJI_KEY_ID, "🔑")
-GLOBE = ce(EMOJI_GLOBE_ID, "🌐")
-REFERRAL = ce(EMOJI_REFERRAL_ID, "👤")
-
-NUMBER_TYPE_LABELS = {
-    "reg": "Регистрация",
-    "nereg": "Без регистрации",
+# Товары каталога: код -> название и цена (цены можно менять в админ-панели).
+PRODUCTS = {
+    "fresh": {"title": "Новореги", "price": 0.50},
+    "warm": {"title": "Фишы", "price": 1.50},
 }
 
-def number_type_label(number_type: str | None) -> str:
-    return NUMBER_TYPE_LABELS.get(number_type or "reg", "Регистрация")
+# Статусы: (минимум покупок, название)
+STATUSES = [
+    (0, "🌱 Новичок"),
+    (5, "⭐ Покупатель"),
+    (25, "🔥 Постоянный клиент"),
+    (100, "💎 VIP"),
+]
 
-def get_number_price(number_type: str | None) -> float:
-    setting_key = "price_nereg" if number_type == "nereg" else "price_reg"
-    return float(get_setting(setting_key) or PRICE_PER_NUMBER)
+# Кастомные эмодзи (в <tg-emoji> внутри — запасной обычный эмодзи)
+EMOJI_PROFILE = '<tg-emoji emoji-id="5452085950022707790">😎</tg-emoji>'
+NUM_1 = '<tg-emoji emoji-id="5830126888357468979">1️⃣</tg-emoji>'
+NUM_2 = '<tg-emoji emoji-id="5830254543375441108">2️⃣</tg-emoji>'
+NUM_3 = '<tg-emoji emoji-id="5827786453303696733">3️⃣</tg-emoji>'
+NUM_4 = '<tg-emoji emoji-id="5830434773088083875">4️⃣</tg-emoji>'
+EMOJI_REFS = '<tg-emoji emoji-id="4960891456869893259">💠</tg-emoji>'
+EMOJI_STATS = '<tg-emoji emoji-id="5854798142578368552">📊</tg-emoji>'
+EMOJI_LINK = '<tg-emoji emoji-id="5271604874419647061">🔗</tg-emoji>'
+EMOJI_SHOP = '<tg-emoji emoji-id="5199874732983353088">💫</tg-emoji>'
+EMOJI_BALANCE = '<tg-emoji emoji-id="5224257782013769471">💰</tg-emoji>'
+EMOJI_MIN = '<tg-emoji emoji-id="5447183459602669338">🔽</tg-emoji>'
+EMOJI_MAX = '<tg-emoji emoji-id="5449683594425410231">🔼</tg-emoji>'
+EMOJI_CUSTOM = '<tg-emoji emoji-id="5197269100878907942">✍️</tg-emoji>'
+# иконки на кнопках способов оплаты
+PROVIDER_ICONS = {"xr": "5798534328698805312", "cb": "5798650400189980129"}
+EMOJI_PAY_AMOUNT = '<tg-emoji emoji-id="5409048419211682843">💵</tg-emoji>'
+EMOJI_INVOICE = '<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji>'
+EMOJI_TTL = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
+EMOJI_STATUS = '<tg-emoji emoji-id="5397782960512444700">📌</tg-emoji>'
+EMOJI_FRESH = '<tg-emoji emoji-id="5850317551090800862">⏰</tg-emoji>'
+EMOJI_WARM = '<tg-emoji emoji-id="5881806211195605908">📸</tg-emoji>'
+EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
-
-class AdminStates(StatesGroup):
-    waiting_number = State()
-    waiting_code = State()
-    waiting_price_reg = State()
-    waiting_price_nereg = State()
-    waiting_penalty = State()
-    waiting_timeout = State()
-    waiting_broadcast = State()
-    waiting_ban = State()
-    waiting_unban = State()
-    waiting_channel = State()
-    waiting_balance_user = State()
-    waiting_balance_amount = State()
-
-class DepositStates(StatesGroup):
-    waiting_custom_amount = State()
-
-
-def db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def migrate_database() -> None:
-    conn = db_connect()
-    cursor = conn.cursor()
-
-
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
+router = Router()
+SEP = "━━━━━━━━━━━━━━━━━━━━"
 
 
-    if 'is_banned' not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT 0")
-        logging.info("✅ Колонка is_banned добавлена в таблицу users")
-
-    if 'referred_by' not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
-        logging.info("✅ Колонка referred_by добавлена в таблицу users")
-
-    if 'referral_earned' not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN referral_earned REAL DEFAULT 0")
-        logging.info("✅ Колонка referral_earned добавлена в таблицу users")
-
-
-    cursor.execute("PRAGMA table_info(requests)")
-    req_columns = [column[1] for column in cursor.fetchall()]
-    if 'completed_at' not in req_columns:
-        cursor.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
-        logging.info("✅ Колонка completed_at добавлена в таблицу requests")
-
-    if 'number_type' not in req_columns:
-        cursor.execute("ALTER TABLE requests ADD COLUMN number_type TEXT DEFAULT 'reg'")
-        logging.info("✅ Колонка number_type добавлена в таблицу requests")
-
-    conn.commit()
-    conn.close()
-
-def init_db() -> None:
-    conn = db_connect()
-
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            balance REAL DEFAULT 0,
-            total_bought INTEGER DEFAULT 0,
-            created_at TEXT,
-            is_banned BOOLEAN DEFAULT 0,
-            referred_by INTEGER,
-            referral_earned REAL DEFAULT 0
-        )
-        """
-    )
-
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            status TEXT DEFAULT 'pending',
-            phone_number TEXT,
-            sms_code TEXT,
-            number_type TEXT DEFAULT 'reg',
-            user_msg_chat_id INTEGER,
-            user_msg_id INTEGER,
-            admin_msg_chat_id INTEGER,
-            admin_msg_id INTEGER,
-            created_at TEXT,
-            issued_at TEXT,
-            completed_at TEXT
-        )
-        """
-    )
-
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS deposits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            amount REAL,
-            invoice_id TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT,
-            completed_at TEXT
-        )
-        """
-    )
-
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """
-    )
-
-
-    old_price_row = conn.execute(
-        "SELECT value FROM settings WHERE key = 'price_per_number'"
-    ).fetchone()
-    old_price = old_price_row["value"] if old_price_row else None
-
-    settings = [
-        ("price_reg", old_price or str(PRICE_PER_NUMBER)),
-        ("price_nereg", old_price or str(PRICE_PER_NUMBER)),
-        ("penalty_amount", str(PENALTY_AMOUNT)),
-        ("timeout_seconds", str(REQUEST_TIMEOUT_SECONDS)),
-    ]
-
-    for key, value in settings:
-        conn.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-            (key, value)
-        )
-
-    conn.commit()
-    conn.close()
-
-
-    migrate_database()
-
-def get_setting(key: str) -> str:
-    conn = db_connect()
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return row["value"] if row else None
-
-def set_setting(key: str, value: str) -> None:
-    conn = db_connect()
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-        (key, value)
-    )
-    conn.commit()
-    conn.close()
-
-def get_or_create_user(user_id: int, username: str | None) -> sqlite3.Row:
-    conn = db_connect()
-    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO users (user_id, username, balance, total_bought, created_at, is_banned) "
-            "VALUES (?, ?, 0, 0, ?, 0)",
-            (user_id, username, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    else:
-        if username and row["username"] != username:
-            conn.execute(
-                "UPDATE users SET username = ? WHERE user_id = ?", (username, user_id)
+# ══════════════════════════════════════════════════════════════
+#  БАЗА ДАННЫХ
+# ══════════════════════════════════════════════════════════════
+async def init_db() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id      INTEGER PRIMARY KEY,
+                username     TEXT,
+                full_name    TEXT,
+                balance      REAL    NOT NULL DEFAULT 0,
+                purchased    INTEGER NOT NULL DEFAULT 0,
+                spent        REAL    NOT NULL DEFAULT 0,
+                deposited    REAL    NOT NULL DEFAULT 0,
+                referrer_id  INTEGER,
+                ref_earned   REAL    NOT NULL DEFAULT 0,
+                reg_date     TEXT    NOT NULL
             )
-            conn.commit()
-    conn.close()
-    return row
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payments (
+                invoice_id  TEXT    PRIMARY KEY,
+                user_id     INTEGER NOT NULL,
+                amount      REAL    NOT NULL,
+                status      TEXT    NOT NULL DEFAULT 'pending',
+                link        TEXT,
+                chat_id     INTEGER,
+                message_id  INTEGER,
+                created_at  INTEGER NOT NULL,
+                expires_at  INTEGER NOT NULL
+            )
+            """
+        )
+        await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        await db.commit()
 
-def create_request(user_id: int, username: str | None, number_type: str = "reg") -> int:
-    conn = db_connect()
-    cur = conn.execute(
-        "INSERT INTO requests (user_id, username, status, number_type, created_at) "
-        "VALUES (?, ?, 'pending', ?, ?)",
-        (user_id, username, number_type, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    req_id = cur.lastrowid
-    conn.close()
-    return req_id
 
-def get_user_by_id(user_id: int) -> sqlite3.Row | None:
-    conn = db_connect()
-    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row
+async def get_user(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
-def set_referrer(user_id: int, referrer_id: int) -> None:
-    conn = db_connect()
-    conn.execute(
-        "UPDATE users SET referred_by = ? WHERE user_id = ? AND referred_by IS NULL",
-        (referrer_id, user_id),
-    )
-    conn.commit()
-    conn.close()
 
-def count_referrals(user_id: int) -> int:
-    conn = db_connect()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)
-    ).fetchone()[0]
-    conn.close()
-    return count
+async def create_user(user_id: int, username: str | None, full_name: str, referrer_id: int | None) -> bool:
+    """Возвращает True, если пользователь новый."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)) as cur:
+            if await cur.fetchone():
+                return False
+        await db.execute(
+            "INSERT INTO users (user_id, username, full_name, referrer_id, reg_date) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, full_name, referrer_id, datetime.now().strftime("%d.%m.%Y")),
+        )
+        await db.commit()
+        return True
 
-def add_referral_earning(user_id: int, amount: float) -> float:
-    conn = db_connect()
-    conn.execute(
-        "UPDATE users SET balance = balance + ?, referral_earned = referral_earned + ? WHERE user_id = ?",
+
+async def update_profile(user_id: int, username: str | None, full_name: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?",
+            (username, full_name, user_id),
+        )
+        await db.commit()
+
+
+async def count_referrals(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def _credit(db: aiosqlite.Connection, user_id: int, amount: float) -> None:
+    """Зачисляет сумму и реферальный бонус (внутри уже открытой транзакции)."""
+    await db.execute(
+        "UPDATE users SET balance = balance + ?, deposited = deposited + ? WHERE user_id = ?",
         (amount, amount, user_id),
     )
-    conn.commit()
-    row = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["balance"] if row else 0.0
+    async with db.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,)) as cur:
+        row = await cur.fetchone()
+    if row and row[0]:
+        bonus = round(amount * REF_PERCENT / 100, 2)
+        await db.execute(
+            "UPDATE users SET balance = balance + ?, ref_earned = ref_earned + ? WHERE user_id = ?",
+            (bonus, bonus, row[0]),
+        )
 
 
-_bot_username_cache: str | None = None
+async def add_balance(user_id: int, amount: float) -> None:
+    """Ручное зачисление: сумма + реферальный бонус пригласившему."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _credit(db, user_id, amount)
+        await db.commit()
 
-async def get_bot_username(bot: Bot) -> str:
-    global _bot_username_cache
-    if _bot_username_cache is None:
-        me = await bot.get_me()
-        _bot_username_cache = me.username
-    return _bot_username_cache
 
-def get_request(req_id: int) -> sqlite3.Row | None:
-    conn = db_connect()
-    row = conn.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
-    conn.close()
-    return row
+async def create_payment(
+    invoice_id: str, user_id: int, amount: float, link: str, chat_id: int, message_id: int
+) -> None:
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO payments (invoice_id, user_id, amount, link, chat_id, message_id, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (invoice_id, user_id, amount, link, chat_id, message_id, now, now + INVOICE_TTL),
+        )
+        await db.commit()
 
-def update_request(req_id: int, **fields) -> None:
-    if not fields:
-        return
-    conn = db_connect()
-    columns = ", ".join(f"{key} = ?" for key in fields)
-    values = list(fields.values()) + [req_id]
-    conn.execute(f"UPDATE requests SET {columns} WHERE id = ?", values)
-    conn.commit()
-    conn.close()
 
-def increment_total_bought(user_id: int) -> None:
-    conn = db_connect()
-    conn.execute(
-        "UPDATE users SET total_bought = total_bought + 1 WHERE user_id = ?", (user_id,)
-    )
-    conn.commit()
-    conn.close()
+async def get_payment(invoice_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM payments WHERE invoice_id = ?", (invoice_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
-def adjust_balance(user_id: int, delta: float) -> float:
-    conn = db_connect()
-    conn.execute(
-        "UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id)
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT balance FROM users WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
-    return row["balance"] if row else 0.0
 
-def create_deposit(user_id: int, amount: float, invoice_id: str) -> int:
-    conn = db_connect()
-    cur = conn.execute(
-        "INSERT INTO deposits (user_id, amount, invoice_id, status, created_at) "
-        "VALUES (?, ?, ?, 'pending', ?)",
-        (user_id, amount, invoice_id, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    deposit_id = cur.lastrowid
-    conn.close()
-    return deposit_id
+async def set_payment_status(invoice_id: str, status: str) -> bool:
+    """Меняет статус только у ожидающего платежа. True — если статус сменился."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE payments SET status = ? WHERE invoice_id = ? AND status = 'pending'",
+            (status, invoice_id),
+        )
+        await db.commit()
+        return cur.rowcount == 1
 
-def update_deposit_status(invoice_id: str, status: str) -> None:
-    conn = db_connect()
-    conn.execute(
-        "UPDATE deposits SET status = ?, completed_at = ? WHERE invoice_id = ?",
-        (status, datetime.now(timezone.utc).isoformat(), invoice_id)
-    )
-    conn.commit()
-    conn.close()
 
-def get_deposit_by_id(deposit_id: int) -> sqlite3.Row | None:
-    conn = db_connect()
-    row = conn.execute(
-        "SELECT * FROM deposits WHERE id = ?", (deposit_id,)
-    ).fetchone()
-    conn.close()
-    return row
-
-def get_all_users() -> list:
-    conn = db_connect()
-    rows = conn.execute("SELECT * FROM users WHERE is_banned = 0").fetchall()
-    conn.close()
-    return rows
-
-def ban_user(user_id: int) -> None:
-    conn = db_connect()
-    conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def unban_user(user_id: int) -> None:
-    conn = db_connect()
-    conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def is_user_banned(user_id: int) -> bool:
-    conn = db_connect()
-    row = conn.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["is_banned"] == 1 if row else False
-
-def is_admin_user(user_id: int, username: str = None) -> bool:
-    if user_id == ADMIN_CHAT_ID:
+async def credit_payment(invoice_id: str) -> bool:
+    """
+    Атомарно: помечает платёж оплаченным и зачисляет баланс.
+    Повторный вызов ничего не зачислит (защита от двойного начисления).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE payments SET status = 'paid' WHERE invoice_id = ? AND status = 'pending'",
+            (invoice_id,),
+        )
+        if cur.rowcount != 1:
+            await db.rollback()
+            return False
+        async with db.execute(
+            "SELECT user_id, amount FROM payments WHERE invoice_id = ?", (invoice_id,)
+        ) as c:
+            user_id, amount = await c.fetchone()
+        await _credit(db, user_id, amount)
+        await db.commit()
         return True
-    if username and username.lower() == ADMIN_USERNAME.lower():
-        return True
-    return False
 
 
-class CryptoBotAPI:
-    def __init__(self, token: str):
-        self.token = token
-        self.headers = {
-            "Crypto-Pay-API-Token": token,
-            "Content-Type": "application/json"
-        }
+async def set_setting(key: str, value: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await db.commit()
 
-    async def create_invoice(self, amount: float, asset: str = "USDT", description: str = "Пополнение баланса") -> dict:
-        url = f"{CRYPTOBOT_API_URL}/createInvoice"
-        payload = {
-            "asset": asset,
-            "amount": str(amount),
-            "description": description,
-            "hidden_message": "Спасибо за пополнение!",
-            "paid_btn_name": "openChannel",
-            "paid_btn_url": "https://t.me/Kretros_sms_bot"
-        }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=self.headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("ok"):
-                        return data.get("result")
-                    else:
-                        logging.error(f"CryptoBot API error: {data}")
-                        return None
-                else:
-                    logging.error(f"CryptoBot API HTTP error: {response.status}")
-                    return None
+async def load_settings() -> None:
+    """Подтягивает сохранённые админом цены и минимум пополнения."""
+    global MIN_TOPUP
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT key, value FROM settings") as cur:
+            rows = await cur.fetchall()
+    for key, value in rows:
+        try:
+            if key == "min_topup":
+                MIN_TOPUP = float(value)
+            elif key.startswith("price:") and key[6:] in PRODUCTS:
+                PRODUCTS[key[6:]]["price"] = float(value)
+        except ValueError:
+            logging.warning("Некорректная настройка %s=%r", key, value)
 
-    async def get_invoice_status(self, invoice_id: str) -> dict:
-        url = f"{CRYPTOBOT_API_URL}/getInvoices"
-        payload = {"invoice_ids": [invoice_id]}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=self.headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("ok") and data.get("result"):
-                        return data["result"]["items"][0] if data["result"]["items"] else None
-                return None
+async def find_user(ref: str) -> dict | None:
+    """Ищет пользователя по ID или @username."""
+    ref = ref.strip().lstrip("@")
+    if not ref:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if ref.isdigit():
+            query, params = "SELECT * FROM users WHERE user_id = ?", (int(ref),)
+        else:
+            query, params = "SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (ref,)
+        async with db.execute(query, params) as cur:
+            row = await cur.fetchone()
+    return dict(row) if row else None
 
-crypto_api = CryptoBotAPI(CRYPTOBOT_API_TOKEN)
+
+async def admin_give(user_id: int, amount: float) -> float:
+    """Выдача баланса админом (без учёта в «Пополнено» и без реф. бонуса). Возвращает новый баланс."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+    user = await get_user(user_id)
+    return user["balance"]
+
+
+async def user_payments(user_id: int, limit: int = 8) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def pending_payments() -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT invoice_id FROM payments WHERE status = 'pending'") as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+# ══════════════════════════════════════════════════════════════
+#  ВСПОМОГАТЕЛЬНОЕ
+# ══════════════════════════════════════════════════════════════
+def money(value: float) -> str:
+    return f"{CURRENCY}{value:,.2f}"
+
+
+def get_status(purchased: int) -> tuple[str, int | None, int]:
+    """(название, порог следующего статуса или None, порог текущего)"""
+    current = STATUSES[0]
+    nxt = None
+    for i, (threshold, name) in enumerate(STATUSES):
+        if purchased >= threshold:
+            current = (threshold, name)
+            nxt = STATUSES[i + 1][0] if i + 1 < len(STATUSES) else None
+    return current[1], nxt, current[0]
+
+
+def progress_bar(purchased: int, start: int, target: int | None, size: int = 10) -> str:
+    if target is None:
+        return "▰" * size + " MAX"
+    span = max(target - start, 1)
+    filled = min(size, int((purchased - start) / span * size))
+    return "▰" * filled + "▱" * (size - filled) + f" {purchased}/{target}"
+
+
+def display_name(user: dict) -> str:
+    if user.get("username"):
+        return f"@{html.escape(user['username'])}"
+    return html.escape(user.get("full_name") or "Без имени")
+
+
+async def build_menu_text(user: dict) -> str:
+    status, _, _ = get_status(user["purchased"])
+
+    return (
+        f"{EMOJI_SHOP} <b>{html.escape(SHOP_NAME)}</b>\n"
+        f"<i>Быстро  •  Надёжно  •  Автоматически</i>\n"
+        f"{SEP}\n\n"
+        f"{EMOJI_PROFILE} <b>Профиль</b>\n"
+        f"├ Никнейм: <b>{display_name(user)}</b>\n"
+        f"├ ID: <code>{user['user_id']}</code>\n"
+        f"├ Статус: <b>{status}</b>\n"
+        f"└ Регистрация: <code>{user['reg_date']}</code>\n\n"
+        f"{EMOJI_FINANCE} <b>Финансы</b>\n"
+        f"├ Баланс: <b>{money(user['balance'])}</b>\n"
+        f"└ Пополнено: <code>{money(user['deposited'])}</code>\n"
+        f"<i>Выберите нужный раздел ниже 👇</i>"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+#  КЛАВИАТУРЫ
+# ══════════════════════════════════════════════════════════════
+def btn(text: str, style: str = "primary", **kwargs) -> InlineKeyboardButton:
+    """Кнопка со стилем (Bot API 9.4): primary = синяя, success = зелёная, danger = красная."""
+    return InlineKeyboardButton(text=text, style=style, **kwargs)
+
+
+def back_btn(callback_data: str = "menu") -> InlineKeyboardButton:
+    """Кнопка «Назад» с кастомным эмодзи."""
+    return btn(text="Назад", callback_data=callback_data, icon_custom_emoji_id="5258236805890710909")
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    price_reg = get_number_price("reg")
-    price_nereg = get_number_price("nereg")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"Номер (Рег) — {price_reg:.2f}$",
-                    callback_data="get_number:reg",
-                    icon_custom_emoji_id=EMOJI_PHONE_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Номер (Нерег) — {price_nereg:.2f}$",
-                    callback_data="get_number:nereg",
-                    icon_custom_emoji_id=EMOJI_PHONE_2_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Баланс",
-                    callback_data="balance",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Рефералы",
-                    callback_data="referrals",
-                    icon_custom_emoji_id=EMOJI_REFERRAL_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Правила",
-                    callback_data="rules",
-                    icon_custom_emoji_id=EMOJI_GEAR_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Поддержка",
-                    callback_data="support",
-                    icon_custom_emoji_id=EMOJI_FOLDER_ID
-                )
-            ],
-        ]
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(text="Купить", style="success", callback_data="buy", icon_custom_emoji_id="4990307318513009602"))
+    kb.row(
+        btn(text="Рефералы", callback_data="refs", icon_custom_emoji_id="4960891456869893259"),
+        btn(text="Финансы", callback_data="finance", icon_custom_emoji_id="5417924076503062111"),
     )
-
-def admin_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="admin_stats"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💰 Управление ценами",
-                    callback_data="admin_prices"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📢 Рассылка",
-                    callback_data="admin_broadcast"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👥 Пользователи",
-                    callback_data="admin_users"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💰 Выдать баланс",
-                    callback_data="admin_give_balance"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔒 Обязательная подписка",
-                    callback_data="admin_subscription"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Выйти из админки",
-                    callback_data="exit_admin"
-                )
-            ],
-        ]
+    kb.row(
+        btn(text="Инструкция", callback_data="guide", icon_custom_emoji_id="5366421375605040850"),
+        btn(text="Тех поддержка", url=SUPPORT_URL, icon_custom_emoji_id="5238025132177369293"),
     )
-
-def admin_subscription_kb() -> InlineKeyboardMarkup:
-    channel = get_setting("required_channel")
-    buttons = []
-    if channel:
-        buttons.append([
-            InlineKeyboardButton(
-                text="✏️ Изменить канал",
-                callback_data="admin_set_channel"
-            )
-        ])
-        buttons.append([
-            InlineKeyboardButton(
-                text="🗑 Отключить обязательную подписку",
-                callback_data="admin_remove_channel"
-            )
-        ])
-    else:
-        buttons.append([
-            InlineKeyboardButton(
-                text="➕ Установить канал",
-                callback_data="admin_set_channel"
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(
-            text="Назад",
-            callback_data="admin_back",
-            icon_custom_emoji_id=EMOJI_CROSS_ID
-        )
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def subscription_required_kb(channel: str) -> InlineKeyboardMarkup:
-    channel_url = f"https://t.me/{channel.lstrip('@')}"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📢 Перейти в канал",
-                    url=channel_url
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✅ Я подписался",
-                    callback_data="check_sub"
-                )
-            ],
-        ]
-    )
-
-def admin_prices_kb() -> InlineKeyboardMarkup:
-    price_reg = get_number_price("reg")
-    price_nereg = get_number_price("nereg")
-    penalty = get_setting("penalty_amount") or PENALTY_AMOUNT
-    timeout = get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"📲 Цена Рег: {price_reg:.2f}$",
-                    callback_data="admin_edit_price_reg"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"📵 Цена Нерег: {price_nereg:.2f}$",
-                    callback_data="admin_edit_price_nereg"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Штраф: {penalty}$",
-                    callback_data="admin_edit_penalty"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"Таймаут: {timeout}с",
-                    callback_data="admin_edit_timeout"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="admin_back",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def admin_users_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Список пользователей",
-                    callback_data="admin_user_list"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Забанить пользователя",
-                    callback_data="admin_ban_user"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Разбанить пользователя",
-                    callback_data="admin_unban_user"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="admin_back",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="back_to_menu",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ]
-        ]
-    )
-
-def admin_back_kb(target: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data=target,
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ]
-        ]
-    )
-
-def balance_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Пополнить",
-                    callback_data="deposit",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="back_to_menu",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def deposit_amount_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="5$",
-                    callback_data="deposit_amount:5",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                ),
-                InlineKeyboardButton(
-                    text="10$",
-                    callback_data="deposit_amount:10",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                ),
-                InlineKeyboardButton(
-                    text="25$",
-                    callback_data="deposit_amount:25",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="50$",
-                    callback_data="deposit_amount:50",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                ),
-                InlineKeyboardButton(
-                    text="150$",
-                    callback_data="deposit_amount:150",
-                    icon_custom_emoji_id=EMOJI_MONEY_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Ввести вручную",
-                    callback_data="deposit_custom",
-                    icon_custom_emoji_id=EMOJI_KEY_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="back_to_balance",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def deposit_confirm_kb(deposit_id: int, invoice_url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Оплатить 💳",
-                    url=invoice_url
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Проверить оплату ✅",
-                    callback_data=f"deposit_check:{deposit_id}",
-                    icon_custom_emoji_id=EMOJI_CHECK_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="back_to_deposit",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def user_searching_kb(req_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Отменить",
-                    callback_data=f"usercancel:{req_id}",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ]
-        ]
-    )
-
-def user_issued_kb(req_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Код отправлен!",
-                    callback_data=f"usercodesent:{req_id}",
-                    icon_custom_emoji_id=EMOJI_CHECK_ID
-                )
-            ]
-        ]
-    )
-
-def admin_new_request_kb(req_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Выдать номер",
-                    callback_data=f"issue:{req_id}",
-                    icon_custom_emoji_id=EMOJI_CHECK_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Отклонить",
-                    callback_data=f"reject:{req_id}",
-                    icon_custom_emoji_id=EMOJI_CROSS_ID
-                )
-            ],
-        ]
-    )
-
-def admin_waiting_sms_kb(req_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Ввести код",
-                    callback_data=f"entercode:{req_id}",
-                    icon_custom_emoji_id=EMOJI_KEY_ID
-                )
-            ]
-        ]
-    )
-
-def admin_confirm_code_kb(req_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Отправить пользователю",
-                    callback_data=f"confirmsend:{req_id}",
-                    icon_custom_emoji_id=EMOJI_CHECK_ID
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Ввести заново",
-                    callback_data=f"entercode:{req_id}",
-                    icon_custom_emoji_id=EMOJI_KEY_ID
-                )
-            ],
-        ]
-    )
+    return kb.as_markup()
 
 
-def build_menu_text(user_row: sqlite3.Row) -> str:
-    username = user_row["username"] or "—"
-    return (
-        f"{STAR}{SMALL_STAR}{SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
-        "―――――――――――――――――\n"
-        f"{USER} User: @{username} !\n"
-        f"{FOLDER} ID: <code>{user_row['user_id']}</code>\n"
-        f"{MONEY} Баланс: {user_row['balance']:.0f}$\n"
-        f"{FOLDER} Всего куплено: {user_row['total_bought']}\n"
-        "―――――――――――――――――\n\n"
-        "Кнопки :"
-    )
-
-def build_balance_text(user_row: sqlite3.Row) -> str:
-    return (
-        f"{MONEY} <b>Ваш баланс</b>\n"
-        "―――――――――――――――――\n"
-        f"Баланс: {user_row['balance']:.2f}$\n"
-        "―――――――――――――――――\n\n"
-        "Пополните баланс для продолжения работы с сервисом."
-    )
-
-def build_deposit_text(amount: float, invoice: dict, deposit_id: int) -> str:
-    return (
-        f"{MONEY} <b>Пополнение баланса</b>\n"
-        "―――――――――――――――――\n"
-        f"Сумма: {amount:.2f} {invoice.get('asset', 'USDT')}\n"
-        f"Счет: #{deposit_id}\n\n"
-        f"Нажмите кнопку <b>«Оплатить 💳»</b> для оплаты\n"
-        "После оплаты нажмите <b>«Проверить оплату ✅»</b>\n\n"
-        f"<b>Статус:</b> ⏳ Ожидание оплаты"
-    )
-
-def build_deposit_success_text(amount: float, new_balance: float) -> str:
-    return (
-        f"{CHECK} <b>Пополнение успешно!</b>\n"
-        "―――――――――――――――――\n"
-        f"Сумма: {amount:.2f}$\n"
-        f"Новый баланс: {new_balance:.2f}$\n\n"
-        "Спасибо за пополнение!"
-    )
-
-def build_waiting_admin_text(req: sqlite3.Row) -> str:
-    return (
-        f"{CHECK} <b>Вы отметили: код отправлен!</b>\n"
-        "―――――――――――――――――\n"
-        f"┣ Номер: <code>{req['phone_number']}</code>\n"
-        "┗ ⏳ Ожидайте, администратор вводит код...\n"
-    )
-
-def build_issued_text(req: sqlite3.Row) -> str:
-    price = get_number_price(req["number_type"])
-    return (
-        f"{CHECK} <b>Номер получен!</b>\n"
-        "―――――――――――――――――\n"
-        f"┣ Номер: <code>{req['phone_number']}</code>\n"
-        f"┣ Тип: {number_type_label(req['number_type'])}\n"
-        "┣ Формат: СМС\n"
-        f"┗ {MONEY} Стоимость: {price:.2f}$\n\n"
-        "⏳ Ожидаю СМС, отправьте код в течение 3 минут"
-    )
-
-def build_subscription_required_text() -> str:
-    channel = get_setting("required_channel")
-    title = get_setting("required_channel_title") or channel
-    return (
-        f"{STAR}{SMALL_STAR}{SMALL_STAR_2} <b>{SHOP_NAME}</b>\n"
-        "―――――――――――――――――\n"
-        f"{WARNING} <b>Доступ ограничен</b>\n\n"
-        "Чтобы пользоваться сервисом, подпишитесь на наш канал:\n\n"
-        f"{GLOBE} <b>{title}</b>\n"
-        f"<code>{channel}</code>\n"
-        "―――――――――――――――――\n\n"
-        "После подписки нажмите кнопку <b>«Я подписался»</b> ниже 👇"
-    )
-
-def build_admin_subscription_text() -> str:
-    channel = get_setting("required_channel")
-    title = get_setting("required_channel_title")
-    if channel:
-        status_block = f"{CHECK} Канал: <b>{title or channel}</b>\n<code>{channel}</code>"
-    else:
-        status_block = f"{CROSS} Обязательная подписка не настроена"
-    return (
-        f"{GLOBE} <b>Обязательная подписка на канал</b>\n"
-        "―――――――――――――――――\n"
-        f"{status_block}\n"
-        "―――――――――――――――――\n\n"
-        "Пока подписка включена, пользователи не смогут открыть меню бота, "
-        "не подписавшись на указанный канал.\n\n"
-        f"{WARNING} Бот обязательно должен быть добавлен в канал администратором — "
-        "иначе проверка подписки работать не будет."
-    )
-
-def build_insufficient_balance_text(balance: float, price: float) -> str:
-    return (
-        f"{CROSS} <b>Недостаточно средств!</b>\n"
-        "―――――――――――――――――\n"
-        f"💰 Ваш баланс: {balance:.2f}$\n"
-        f"📱 Стоимость номера: {price:.2f}$\n"
-        f"❌ Не хватает: {(price - balance):.2f}$\n\n"
-        "Пополните баланс через раздел <b>«Баланс»</b> в меню."
-    )
-
-def build_referral_text(user_row: sqlite3.Row, referrals_count: int, ref_link: str) -> str:
-    earned = user_row["referral_earned"] or 0
-    return (
-        f"{REFERRAL} <b>Реферальная программа</b>\n"
-        "―――――――――――――――――\n"
-        f"Приглашайте друзей и получайте <b>{REFERRAL_PERCENT:.0f}%</b> "
-        "с каждого их пополнения баланса — автоматически и навсегда.\n"
-        "―――――――――――――――――\n"
-        f"👥 Приглашено рефералов: <b>{referrals_count}</b>\n"
-        f"{MONEY} Заработано с рефералов: <b>{earned:.2f}$</b>\n"
-        "―――――――――――――――――\n\n"
-        f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
-        "Отправьте её друзьям — как только они пополнят баланс, "
-        f"вы сразу получите {REFERRAL_PERCENT:.0f}% от суммы пополнения к себе на счёт."
-    )
+def back_kb(*extra: InlineKeyboardButton) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for button in extra:
+        kb.row(button)
+    kb.row(back_btn("menu"))
+    return kb.as_markup()
 
 
-async def schedule_timeout(bot: Bot, req_id: int) -> None:
+def back_kb_to(callback_data: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn(callback_data))
+    return kb.as_markup()
+
+
+async def safe_edit(call: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
     try:
-        penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
-        await asyncio.sleep(REQUEST_TIMEOUT_SECONDS)
-    except asyncio.CancelledError:
-        return
-
-    req = get_request(req_id)
-    if req is None or req["status"] != "issued":
-        return
-
-    update_request(req_id, status="expired")
-    new_balance = adjust_balance(req["user_id"], -penalty)
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=(
-                    f"{WARNING} <b>СМС не пришло</b> {WARNING}\n\n"
-                    f"{PHONE_2} Номер был возвращён в сток\n\n"
-                    f"{GLOBE} Штраф: {penalty:.2f}$\n"
-                    f"{MONEY} Ваш баланс: {new_balance:.2f}$"
-                ),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение пользователя (timeout)")
-
-    if req["admin_msg_chat_id"] and req["admin_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["admin_msg_chat_id"],
-                message_id=req["admin_msg_id"],
-                text=(
-                    f"⌛ <b>Заявка #{req_id} просрочена.</b>\n"
-                    f"Номер <code>{req['phone_number']}</code> для @{req['username'] or req['user_id']} "
-                    "— пользователь не нажал «Код отправлен!» вовремя.\n"
-                    f"Штраф {penalty:.2f}$ списан с баланса пользователя."
-                ),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение админа (timeout)")
-
-    active_timers.pop(req_id, None)
-
-def start_timer(bot: Bot, req_id: int) -> None:
-    cancel_timer(req_id)
-    active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
-
-async def schedule_admin_timeout(bot: Bot, req_id: int) -> None:
-    try:
-        await asyncio.sleep(REQUEST_TIMEOUT_SECONDS)
-    except asyncio.CancelledError:
-        return
-
-    req = get_request(req_id)
-    if req is None or req["status"] != "code_pending":
-        return
-
-    update_request(req_id, status="issued")
-    req = get_request(req_id)
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=build_issued_text(req),
-                reply_markup=user_issued_kb(req_id),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось вернуть сообщение пользователя (admin timeout)")
-
-    try:
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"⌛ <b>Заявка #{req_id}:</b> вы не ввели код за 3 минуты.\n"
-            "Заявка возвращена пользователю, ждём повторного нажатия «Код отправлен!».",
-            parse_mode="HTML",
-        )
-    except Exception:
-        logging.exception("Не удалось уведомить админа о таймауте ввода кода")
-
-    active_timers.pop(req_id, None)
-    active_timers[req_id] = asyncio.create_task(schedule_timeout(bot, req_id))
-
-def start_admin_timer(bot: Bot, req_id: int) -> None:
-    cancel_timer(req_id)
-    active_timers[req_id] = asyncio.create_task(schedule_admin_timeout(bot, req_id))
-
-def cancel_timer(req_id: int) -> None:
-    task = active_timers.pop(req_id, None)
-    if task and not task.done():
-        task.cancel()
-
-def is_admin_chat(chat_id: int) -> bool:
-    return chat_id == ADMIN_CHAT_ID
-
-async def check_user_subscribed(bot: Bot, user_id: int) -> bool:
-    channel = get_setting("required_channel")
-    if not channel:
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
-        return member.status in ("member", "administrator", "creator")
-    except Exception:
-        logging.exception("Не удалось проверить подписку пользователя на канал")
-        return False
+        await call.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
+async def ensure_user(call_or_msg) -> dict:
+    u = call_or_msg.from_user
+    await create_user(u.id, u.username, u.full_name, None)
+    await update_profile(u.id, u.username, u.full_name)
+    return await get_user(u.id)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ХЕНДЛЕРЫ
+# ══════════════════════════════════════════════════════════════
 @router.message(CommandStart())
-async def cmd_start(message: Message, bot: Bot) -> None:
-    user_id = message.from_user.id
+async def cmd_start(message: Message, command: CommandObject, bot: Bot, state: FSMContext) -> None:
+    await state.clear()
+    u = message.from_user
 
+    referrer_id = None
+    if command.args and command.args.startswith("ref_"):
+        raw = command.args[4:]
+        if raw.isdigit() and int(raw) != u.id and await get_user(int(raw)):
+            referrer_id = int(raw)
 
-    if is_user_banned(user_id):
-        await message.answer(
-            "❌ Вы забанены в боте. Обратитесь к администратору @DATROQ.",
-            parse_mode="HTML",
-        )
-        return
+    is_new = await create_user(u.id, u.username, u.full_name, referrer_id)
+    await update_profile(u.id, u.username, u.full_name)
 
-    required_channel = get_setting("required_channel")
-    if required_channel:
-        subscribed = await check_user_subscribed(bot, user_id)
-        if not subscribed:
-            await message.answer(
-                build_subscription_required_text(),
-                reply_markup=subscription_required_kb(required_channel),
-                parse_mode="HTML",
-            )
-            return
-
-    is_new_user = get_user_by_id(user_id) is None
-    user_row = get_or_create_user(message.from_user.id, message.from_user.username)
-
-    if is_new_user:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].startswith("ref_"):
-            referrer_id_raw = parts[1][len("ref_"):]
-            try:
-                referrer_id = int(referrer_id_raw)
-            except ValueError:
-                referrer_id = None
-
-            if referrer_id and referrer_id != user_id and get_user_by_id(referrer_id):
-                set_referrer(user_id, referrer_id)
-                try:
-                    await bot.send_message(
-                        referrer_id,
-                        f"{REFERRAL} <b>У вас новый реферал!</b>\n"
-                        f"@{message.from_user.username or user_id} присоединился по вашей ссылке.\n"
-                        f"Вы будете получать {REFERRAL_PERCENT:.0f}% с каждого его пополнения.",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    logging.exception(f"Не удалось уведомить реферера {referrer_id} о новом реферале")
-
-    await message.answer(
-        build_menu_text(user_row),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
-
-@router.message(Command("admin"))
-async def cmd_admin(message: Message) -> None:
-    user_id = message.from_user.id
-    username = message.from_user.username
-
-
-    if not is_admin_user(user_id, username):
-        await message.answer(
-            "❌ У вас нет доступа к админ-панели!",
-            parse_mode="HTML",
-        )
-        return
-
-
-    await message.answer(
-        f"{GEAR} <b>Админ-панель</b>\n\n"
-        "Добро пожаловать в админ-панель бота!",
-        reply_markup=admin_menu_kb(),
-        parse_mode="HTML",
-    )
-
-@router.callback_query(F.data == "exit_admin")
-async def cb_exit_admin(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id
-
-    if not is_admin_user(user_id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    user_row = get_or_create_user(user_id, callback.from_user.username)
-    await callback.message.edit_text(
-        build_menu_text(user_row),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "back_to_menu")
-async def cb_back_to_menu(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id
-    user_row = get_or_create_user(user_id, callback.from_user.username)
-    await callback.message.edit_text(
-        build_menu_text(user_row),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_back")
-async def cb_admin_back(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await callback.message.edit_text(
-        f"{GEAR} <b>Админ-панель</b>\n\n"
-        "Добро пожаловать в админ-панель бота!",
-        reply_markup=admin_menu_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin_stats")
-async def cb_admin_stats(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    conn = db_connect()
-
-    users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    banned_count = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
-
-    total_requests = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
-    pending_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'pending'").fetchone()[0]
-    completed_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'completed'").fetchone()[0]
-    expired_requests = conn.execute("SELECT COUNT(*) FROM requests WHERE status = 'expired'").fetchone()[0]
-
-    total_deposits = conn.execute("SELECT COUNT(*) FROM deposits").fetchone()[0]
-    total_amount = conn.execute("SELECT SUM(amount) FROM deposits WHERE status = 'completed'").fetchone()[0] or 0
-
-    conn.close()
-
-    await callback.message.edit_text(
-        f"{FOLDER} <b>Статистика бота</b>\n"
-        "―――――――――――――――――\n"
-        f"{USER} <b>Пользователи:</b>\n"
-        f"┣ Всего: {users_count}\n"
-        f"┗ Забанено: {banned_count}\n\n"
-        f"{PHONE} <b>Заявки:</b>\n"
-        f"┣ Всего: {total_requests}\n"
-        f"┣ В обработке: {pending_requests}\n"
-        f"┣ Выполнено: {completed_requests}\n"
-        f"┗ Просрочено: {expired_requests}\n\n"
-        f"{MONEY} <b>Финансы:</b>\n"
-        f"┣ Депозитов: {total_deposits}\n"
-        f"┗ Собрано: {total_amount:.2f}$",
-        reply_markup=admin_menu_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_prices")
-async def cb_admin_prices(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await callback.message.edit_text(
-        f"{GEAR} <b>Управление ценами</b>\n\n"
-        "Настройте параметры сервиса:",
-        reply_markup=admin_prices_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_edit_price_reg")
-async def cb_admin_edit_price_reg(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_price_reg)
-    await callback.message.edit_text(
-        f"{KEY} <b>Введите новую цену за Рег-номер</b>\n"
-        "―――――――――――――――――\n"
-        f"Текущая цена: {get_number_price('reg'):.2f}$\n\n"
-        "Введите цену цифрами (например: 1.5, 2, 3.25):",
-        reply_markup=admin_back_kb("admin_prices"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_price_reg)
-async def process_price_reg_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    try:
-        price = float(message.text.replace(",", "."))
-        if price < 0:
-            await message.answer("❌ Цена не может быть отрицательной!")
-            return
-
-        set_setting("price_reg", str(price))
-        await message.answer(
-            f"{CHECK} Цена за Рег-номер установлена: {price:.2f}$",
-            reply_markup=admin_prices_kb(),
-            parse_mode="HTML",
-        )
-        await state.clear()
-    except ValueError:
-        await message.answer(
-            "❌ Введите корректное число (например: 1.5, 2, 3.25)",
-            parse_mode="HTML",
-        )
-
-@router.callback_query(F.data == "admin_edit_price_nereg")
-async def cb_admin_edit_price_nereg(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_price_nereg)
-    await callback.message.edit_text(
-        f"{KEY} <b>Введите новую цену за Нерег-номер</b>\n"
-        "―――――――――――――――――\n"
-        f"Текущая цена: {get_number_price('nereg'):.2f}$\n\n"
-        "Введите цену цифрами (например: 1.5, 2, 3.25):",
-        reply_markup=admin_back_kb("admin_prices"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_price_nereg)
-async def process_price_nereg_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    try:
-        price = float(message.text.replace(",", "."))
-        if price < 0:
-            await message.answer("❌ Цена не может быть отрицательной!")
-            return
-
-        set_setting("price_nereg", str(price))
-        await message.answer(
-            f"{CHECK} Цена за Нерег-номер установлена: {price:.2f}$",
-            reply_markup=admin_prices_kb(),
-            parse_mode="HTML",
-        )
-        await state.clear()
-    except ValueError:
-        await message.answer(
-            "❌ Введите корректное число (например: 1.5, 2, 3.25)",
-            parse_mode="HTML",
-        )
-
-@router.callback_query(F.data == "admin_edit_penalty")
-async def cb_admin_edit_penalty(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_penalty)
-    await callback.message.edit_text(
-        f"{KEY} <b>Введите новый размер штрафа</b>\n"
-        "―――――――――――――――――\n"
-        f"Текущий штраф: {get_setting('penalty_amount') or PENALTY_AMOUNT}$\n\n"
-        "Введите сумму штрафа цифрами (например: 0.5, 1, 2):",
-        reply_markup=admin_back_kb("admin_prices"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_penalty)
-async def process_penalty_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    try:
-        penalty = float(message.text.replace(",", "."))
-        if penalty < 0:
-            await message.answer("❌ Штраф не может быть отрицательным!")
-            return
-
-        set_setting("penalty_amount", str(penalty))
-        await message.answer(
-            f"{CHECK} Штраф установлен: {penalty:.2f}$",
-            reply_markup=admin_prices_kb(),
-            parse_mode="HTML",
-        )
-        await state.clear()
-    except ValueError:
-        await message.answer(
-            "❌ Введите корректное число (например: 0.5, 1, 2)",
-            parse_mode="HTML",
-        )
-
-@router.callback_query(F.data == "admin_edit_timeout")
-async def cb_admin_edit_timeout(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_timeout)
-    await callback.message.edit_text(
-        f"{KEY} <b>Введите новый таймаут</b>\n"
-        "―――――――――――――――――\n"
-        f"Текущий таймаут: {get_setting('timeout_seconds') or REQUEST_TIMEOUT_SECONDS} секунд\n\n"
-        "Введите время в секундах (например: 180, 300, 600):",
-        reply_markup=admin_back_kb("admin_prices"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_timeout)
-async def process_timeout_change(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    try:
-        timeout = int(message.text)
-        if timeout < 30:
-            await message.answer("❌ Таймаут не может быть меньше 30 секунд!")
-            return
-
-        set_setting("timeout_seconds", str(timeout))
-        global REQUEST_TIMEOUT_SECONDS
-        REQUEST_TIMEOUT_SECONDS = timeout
-
-        await message.answer(
-            f"{CHECK} Таймаут установлен: {timeout} секунд",
-            reply_markup=admin_prices_kb(),
-            parse_mode="HTML",
-        )
-        await state.clear()
-    except ValueError:
-        await message.answer(
-            "❌ Введите корректное число (например: 180, 300, 600)",
-            parse_mode="HTML",
-        )
-
-
-@router.callback_query(F.data == "admin_broadcast")
-async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_broadcast)
-    await callback.message.edit_text(
-        f"{PHONE} <b>Рассылка сообщений</b>\n"
-        "―――――――――――――――――\n"
-        "Введите текст для рассылки всем пользователям.\n\n"
-        "Поддерживается HTML-разметка.\n\n"
-        "Для отмены нажмите кнопку «Назад»:",
-        reply_markup=admin_back_kb("admin_back"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_broadcast)
-async def process_broadcast(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    text = message.text
-    users = get_all_users()
-
-    await message.answer(
-        f"{CHECK} <b>Начинаю рассылку...</b>\n"
-        f"Пользователей: {len(users)}",
-        parse_mode="HTML",
-    )
-
-    success = 0
-    fail = 0
-
-    for user in users:
+    if is_new and referrer_id:
         try:
             await bot.send_message(
-                user["user_id"],
-                f"{PHONE} <b>Рассылка от администрации</b>\n\n{text}",
-                parse_mode="HTML",
-            )
-            success += 1
-            await asyncio.sleep(0.1)
-        except Exception:
-            fail += 1
-
-    await message.answer(
-        f"{CHECK} <b>Рассылка завершена!</b>\n"
-        "―――――――――――――――――\n"
-        f"✅ Отправлено: {success}\n"
-        f"❌ Не доставлено: {fail}",
-        reply_markup=admin_menu_kb(),
-        parse_mode="HTML",
-    )
-    await state.clear()
-
-
-@router.callback_query(F.data == "admin_subscription")
-async def cb_admin_subscription(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await callback.message.edit_text(
-        build_admin_subscription_text(),
-        reply_markup=admin_subscription_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_set_channel")
-async def cb_admin_set_channel(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_channel)
-    await callback.message.edit_text(
-        f"{KEY} <b>Укажите канал для обязательной подписки</b>\n"
-        "―――――――――――――――――\n"
-        "Отправьте username канала в формате:\n<code>@your_channel</code>\n\n"
-        f"{WARNING} Бот должен быть добавлен в канал в роли <b>администратора</b>, "
-        "иначе проверка подписки работать не будет.",
-        reply_markup=admin_back_kb("admin_subscription"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(AdminStates.waiting_channel)
-async def process_channel_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        await message.answer("Недоступно")
-        return
-
-    channel = message.text.strip()
-
-    if not channel.startswith("@"):
-        await message.answer(
-            f"{CROSS} Введите username канала в формате <code>@channel_username</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    try:
-        chat = await bot.get_chat(channel)
-    except Exception:
-        await message.answer(
-            f"{CROSS} Канал не найден. Проверьте username и попробуйте снова.",
-            parse_mode="HTML",
-        )
-        return
-
-    try:
-        me = await bot.get_me()
-        member = await bot.get_chat_member(chat_id=channel, user_id=me.id)
-        if member.status not in ("administrator", "creator"):
-            await message.answer(
-                f"{CROSS} Бот не является администратором канала «{chat.title}».\n"
-                "Добавьте бота в администраторы канала и попробуйте снова.",
-                parse_mode="HTML",
-            )
-            return
-    except Exception:
-        await message.answer(
-            f"{CROSS} Не удалось проверить права бота в канале. "
-            "Убедитесь, что бот добавлен как администратор, и повторите попытку.",
-            parse_mode="HTML",
-        )
-        return
-
-    set_setting("required_channel", channel)
-    set_setting("required_channel_title", chat.title or channel)
-
-    await message.answer(
-        f"{CHECK} <b>Обязательная подписка настроена!</b>\n"
-        "―――――――――――――――――\n"
-        f"Канал: <b>{chat.title}</b>\n"
-        f"<code>{channel}</code>",
-        reply_markup=admin_subscription_kb(),
-        parse_mode="HTML",
-    )
-    await state.clear()
-
-@router.callback_query(F.data == "admin_remove_channel")
-async def cb_admin_remove_channel(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    set_setting("required_channel", "")
-    set_setting("required_channel_title", "")
-
-    await callback.message.edit_text(
-        build_admin_subscription_text(),
-        reply_markup=admin_subscription_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer("Обязательная подписка отключена")
-
-@router.callback_query(F.data == "check_sub")
-async def cb_check_sub(callback: CallbackQuery, bot: Bot) -> None:
-    user_id = callback.from_user.id
-    required_channel = get_setting("required_channel")
-
-    if not required_channel:
-        user_row = get_or_create_user(user_id, callback.from_user.username)
-        await callback.message.edit_text(
-            build_menu_text(user_row),
-            reply_markup=main_menu_kb(),
-            parse_mode="HTML",
-        )
-        await callback.answer()
-        return
-
-    subscribed = await check_user_subscribed(bot, user_id)
-
-    if subscribed:
-        user_row = get_or_create_user(user_id, callback.from_user.username)
-        await callback.message.edit_text(
-            build_menu_text(user_row),
-            reply_markup=main_menu_kb(),
-            parse_mode="HTML",
-        )
-        await callback.answer("✅ Подписка подтверждена!")
-    else:
-        await callback.answer("❌ Вы всё ещё не подписаны на канал", show_alert=True)
-
-@router.callback_query(F.data == "admin_users")
-async def cb_admin_users(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await callback.message.edit_text(
-        f"{USER} <b>Управление пользователями</b>\n\n"
-        "Выберите действие:",
-        reply_markup=admin_users_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_user_list")
-async def cb_admin_user_list(callback: CallbackQuery) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    conn = db_connect()
-    users = conn.execute(
-        "SELECT user_id, username, balance, total_bought, is_banned FROM users ORDER BY balance DESC LIMIT 50"
-    ).fetchall()
-    conn.close()
-
-    text = f"{USER} <b>Список пользователей (топ 50)</b>\n"
-    text += "―――――――――――――――――\n"
-
-    for i, user in enumerate(users, 1):
-        status = "🔴 Забанен" if user["is_banned"] else "🟢 Активен"
-        text += (
-            f"{i}. @{user['username'] or user['user_id']}\n"
-            f"   💰 {user['balance']:.2f}$ | 📱 {user['total_bought']}\n"
-            f"   {status}\n\n"
-        )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=admin_users_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_ban_user")
-async def cb_admin_ban_user(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_ban)
-    await callback.message.edit_text(
-        f"{CROSS} <b>Бан пользователя</b>\n"
-        "―――――――――――――――――\n"
-        "Введите ID пользователя для бана (можно скопировать из списка пользователей):\n\n"
-        "Пример: 123456789",
-        reply_markup=admin_back_kb("admin_users"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_unban_user")
-async def cb_admin_unban_user(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_unban)
-    await callback.message.edit_text(
-        f"{CHECK} <b>Разбан пользователя</b>\n"
-        "―――――――――――――――――\n"
-        "Введите ID пользователя для разбана:\n\n"
-        "Пример: 123456789",
-        reply_markup=admin_back_kb("admin_users"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-
-@router.message(StateFilter(AdminStates.waiting_ban, AdminStates.waiting_unban))
-async def handle_admin_ban_unban(message: Message, state: FSMContext) -> None:
-    if not is_admin_user(message.from_user.id, message.from_user.username):
-        return
-
-    current_state = await state.get_state()
-
-    try:
-        user_id = int(message.text.strip())
-
-        if current_state == "AdminStates:waiting_ban":
-            ban_user(user_id)
-            await message.answer(
-                f"{CROSS} Пользователь {user_id} забанен.",
-                reply_markup=admin_users_kb(),
-                parse_mode="HTML",
-            )
-            await state.clear()
-
-        elif current_state == "AdminStates:waiting_unban":
-            unban_user(user_id)
-            await message.answer(
-                f"{CHECK} Пользователь {user_id} разбанен.",
-                reply_markup=admin_users_kb(),
-                parse_mode="HTML",
-            )
-            await state.clear()
-
-    except ValueError:
-        await message.answer(
-            "❌ Введите корректный ID пользователя (только цифры)",
-            parse_mode="HTML",
-        )
-
-
-@router.callback_query(F.data == "admin_give_balance")
-async def cb_admin_give_balance(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_user(callback.from_user.id, callback.from_user.username):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_balance_user)
-    await callback.message.edit_text(
-        f"{MONEY} <b>Выдача баланса</b>\n"
-        "―――――――――――――――――\n"
-        "Введите ID пользователя или его @username:\n\n"
-        "Пример: 123456789 или @username",
-        reply_markup=admin_back_kb("admin_back"),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.message(StateFilter(AdminStates.waiting_balance_user), F.chat.id == ADMIN_CHAT_ID)
-async def process_balance_user(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw:
-        await message.answer(
-            "❌ Введите ID пользователя или @username:",
-            reply_markup=admin_back_kb("admin_back"),
-        )
-        return
-
-    conn = db_connect()
-    if raw.startswith("@"):
-        row = conn.execute(
-            "SELECT * FROM users WHERE LOWER(username) = ?", (raw[1:].lower(),)
-        ).fetchone()
-    else:
-        try:
-            target_id = int(raw)
-        except ValueError:
-            conn.close()
-            await message.answer(
-                "❌ Некорректный формат. Введите числовой ID или @username:",
-                reply_markup=admin_back_kb("admin_back"),
-            )
-            return
-        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_id,)).fetchone()
-    conn.close()
-
-    if row is None:
-        await message.answer(
-            f"{CROSS} Пользователь не найден в базе. "
-            "Он должен хотя бы раз запустить бота (/start). Попробуйте снова:",
-            reply_markup=admin_back_kb("admin_back"),
-            parse_mode="HTML",
-        )
-        return
-
-    await state.update_data(
-        target_user_id=row["user_id"],
-        target_username=row["username"],
-    )
-    await state.set_state(AdminStates.waiting_balance_amount)
-
-    await message.answer(
-        f"{USER} Пользователь: @{row['username'] or row['user_id']}\n"
-        f"{MONEY} Текущий баланс: {row['balance']:.2f}$\n\n"
-        "Введите сумму для начисления. Чтобы списать — укажите знак «-» "
-        "(например: 5, 2.5, -3):",
-        reply_markup=admin_back_kb("admin_back"),
-        parse_mode="HTML",
-    )
-
-
-@router.message(StateFilter(AdminStates.waiting_balance_amount), F.chat.id == ADMIN_CHAT_ID)
-async def process_balance_amount(message: Message, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    target_user_id = data.get("target_user_id")
-
-    if target_user_id is None:
-        await message.answer("Сессия истекла, начните заново через меню.")
-        await state.clear()
-        return
-
-    raw_amount = (message.text or "").strip().replace(",", ".")
-    try:
-        amount = float(raw_amount)
-    except ValueError:
-        await message.answer(
-            f"{CROSS} Некорректная сумма. Введите число, например: 5 или -2.5",
-            reply_markup=admin_back_kb("admin_back"),
-        )
-        return
-
-    if amount == 0:
-        await message.answer(
-            f"{CROSS} Сумма не может быть равна нулю. Введите другое значение:",
-            reply_markup=admin_back_kb("admin_back"),
-        )
-        return
-
-    # Пользователь мог поменять username между шагами — берём актуальные данные
-    conn = db_connect()
-    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_user_id,)).fetchone()
-    conn.close()
-
-    if row is None:
-        await message.answer(f"{CROSS} Пользователь больше не найден в базе.")
-        await state.clear()
-        return
-
-    new_balance = adjust_balance(target_user_id, amount)
-    username = row["username"]
-
-    sign = "+" if amount > 0 else ""
-    await message.answer(
-        f"{CHECK} Баланс @{username or target_user_id} изменён на {sign}{amount:.2f}$\n"
-        f"Новый баланс: {new_balance:.2f}$",
-        reply_markup=admin_menu_kb(),
-        parse_mode="HTML",
-    )
-
-    try:
-        if amount > 0:
-            user_text = (
-                f"{MONEY} <b>Ваш баланс пополнен администратором на {amount:.2f}$</b>\n"
-                f"Текущий баланс: {new_balance:.2f}$"
-            )
-        else:
-            user_text = (
-                f"{MONEY} <b>С вашего баланса списано {abs(amount):.2f}$</b>\n"
-                f"Текущий баланс: {new_balance:.2f}$"
-            )
-        await bot.send_message(target_user_id, user_text, parse_mode="HTML")
-    except Exception:
-        logging.exception(
-            f"Не удалось уведомить пользователя {target_user_id} об изменении баланса"
-        )
-
-    await state.clear()
-
-
-@router.callback_query(F.data == "balance")
-async def cb_balance(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id
-
-    if is_user_banned(user_id):
-        await callback.answer("Вы забанены!", show_alert=True)
-        return
-
-    user_row = get_or_create_user(user_id, callback.from_user.username)
-    await callback.message.edit_text(
-        build_balance_text(user_row),
-        reply_markup=balance_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "referrals")
-async def cb_referrals(callback: CallbackQuery, bot: Bot) -> None:
-    user_id = callback.from_user.id
-
-    if is_user_banned(user_id):
-        await callback.answer("Вы забанены!", show_alert=True)
-        return
-
-    user_row = get_or_create_user(user_id, callback.from_user.username)
-    referrals_count = count_referrals(user_id)
-    bot_username = await get_bot_username(bot)
-    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-
-    await callback.message.edit_text(
-        build_referral_text(user_row, referrals_count, ref_link),
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "deposit")
-async def cb_deposit(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        f"{MONEY} <b>Выберите сумму пополнения</b>\n"
-        "―――――――――――――――――\n"
-        f"Минимальная сумма: {MIN_DEPOSIT}$\n\n"
-        "Выберите сумму или введите вручную:",
-        reply_markup=deposit_amount_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "back_to_balance")
-async def cb_back_to_balance(callback: CallbackQuery) -> None:
-    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
-    await callback.message.edit_text(
-        build_balance_text(user_row),
-        reply_markup=balance_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "back_to_deposit")
-async def cb_back_to_deposit(callback: CallbackQuery) -> None:
-    user_row = get_or_create_user(callback.from_user.id, callback.from_user.username)
-    await callback.message.edit_text(
-        build_balance_text(user_row),
-        reply_markup=deposit_amount_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("deposit_amount:"))
-async def cb_deposit_amount(callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id
-
-    if is_user_banned(user_id):
-        await callback.answer("Вы забанены!", show_alert=True)
-        return
-
-    amount = float(callback.data.split(":")[1])
-
-    invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
-
-    if not invoice:
-        await callback.message.edit_text(
-            "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
-            reply_markup=back_kb(),
-            parse_mode="HTML",
-        )
-        await callback.answer()
-        return
-
-    deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
-
-    await callback.message.edit_text(
-        build_deposit_text(amount, invoice, deposit_id),
-        reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "deposit_custom")
-async def cb_deposit_custom(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(DepositStates.waiting_custom_amount)
-    await callback.message.edit_text(
-        f"{KEY} <b>Введите сумму пополнения</b>\n"
-        "―――――――――――――――――\n"
-        f"Минимальная сумма: {MIN_DEPOSIT}$\n\n"
-        "Введите сумму цифрами (например: 7, 15, 30):",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(DepositStates.waiting_custom_amount)
-async def process_custom_amount(message: Message, state: FSMContext) -> None:
-    try:
-        amount = float(message.text.replace(",", "."))
-        if amount < MIN_DEPOSIT:
-            await message.answer(
-                f"❌ Минимальная сумма пополнения: {MIN_DEPOSIT}$\n"
-                "Пожалуйста, введите сумму больше.",
-                parse_mode="HTML",
-            )
-            return
-
-        user_id = message.from_user.id
-
-        invoice = await crypto_api.create_invoice(amount, PAY_ASSET, f"Пополнение баланса пользователя {user_id}")
-
-        if not invoice:
-            await message.answer(
-                "❌ Ошибка при создании счета. Пожалуйста, попробуйте позже.",
-                reply_markup=back_kb(),
-                parse_mode="HTML",
-            )
-            await state.clear()
-            return
-
-        deposit_id = create_deposit(user_id, amount, invoice["invoice_id"])
-
-        await message.answer(
-            build_deposit_text(amount, invoice, deposit_id),
-            reply_markup=deposit_confirm_kb(deposit_id, invoice["pay_url"]),
-            parse_mode="HTML",
-        )
-        await state.clear()
-
-    except ValueError:
-        await message.answer(
-            "❌ Пожалуйста, введите корректное число (например: 7, 15, 30)",
-            parse_mode="HTML",
-        )
-
-@router.callback_query(F.data.startswith("deposit_check:"))
-async def cb_deposit_check(callback: CallbackQuery, bot: Bot) -> None:
-    deposit_id = int(callback.data.split(":")[1])
-    user_id = callback.from_user.id
-
-    deposit = get_deposit_by_id(deposit_id)
-
-    if deposit is None:
-        await callback.answer("Заявка не найдена", show_alert=True)
-        return
-
-    if deposit["user_id"] != user_id:
-        await callback.answer("Это не ваша заявка", show_alert=True)
-        return
-
-    if deposit["status"] != "pending":
-        await callback.answer("Эта заявка уже обработана", show_alert=True)
-        return
-
-    invoice_status = await crypto_api.get_invoice_status(deposit["invoice_id"])
-
-    if not invoice_status:
-        await callback.answer("Ошибка проверки статуса. Попробуйте позже.", show_alert=True)
-        return
-
-    if invoice_status.get("status") == "paid":
-        new_balance = adjust_balance(user_id, deposit["amount"])
-        update_deposit_status(deposit["invoice_id"], "completed")
-
-        await callback.message.edit_text(
-            build_deposit_success_text(deposit["amount"], new_balance),
-            reply_markup=back_kb(),
-            parse_mode="HTML",
-        )
-        await callback.answer("✅ Оплата подтверждена!")
-
-        depositor = get_user_by_id(user_id)
-        if depositor and depositor["referred_by"]:
-            referrer_id = depositor["referred_by"]
-            reward = round(deposit["amount"] * REFERRAL_PERCENT / 100, 2)
-            if reward > 0:
-                add_referral_earning(referrer_id, reward)
-                try:
-                    await bot.send_message(
-                        referrer_id,
-                        f"{REFERRAL} <b>Реферальный бонус!</b>\n"
-                        f"―――――――――――――――――\n"
-                        f"Ваш реферал @{callback.from_user.username or user_id} "
-                        f"пополнил баланс на {deposit['amount']:.2f}$\n"
-                        f"{MONEY} Вам начислено: <b>{reward:.2f}$</b> ({REFERRAL_PERCENT:.0f}%)",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    logging.exception(
-                        f"Не удалось уведомить реферера {referrer_id} о реферальном бонусе"
-                    )
-
-        try:
-            await bot.send_message(
-                ADMIN_CHAT_ID,
-                f"{MONEY} <b>Пополнение баланса</b>\n"
-                f"Пользователь: @{callback.from_user.username or user_id}\n"
-                f"Сумма: {deposit['amount']:.2f}$\n"
-                f"Новый баланс: {new_balance:.2f}$",
-                parse_mode="HTML",
+                referrer_id,
+                f"🎉 <b>Новый реферал!</b>\nПо вашей ссылке зарегистрировался "
+                f"<b>{html.escape(u.full_name)}</b>.\n"
+                f"Вы будете получать <b>{REF_PERCENT:g}%</b> с его пополнений.",
             )
         except Exception:
-            logging.exception(
-                f"Не удалось уведомить админа о депозите (invoice {deposit['invoice_id']})"
-            )
-    else:
-        await callback.answer("⏳ Счет еще не оплачен. Попробуйте позже.", show_alert=True)
+            pass
+
+    user = await get_user(u.id)
+    await message.answer(await build_menu_text(user), reply_markup=main_menu_kb())
 
 
-@router.callback_query(F.data.startswith("get_number:"))
-async def cb_get_number(callback: CallbackQuery, bot: Bot) -> None:
-    user_id = callback.from_user.id
+@router.callback_query(F.data == "menu")
+async def cb_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user = await ensure_user(call)
+    await safe_edit(call, await build_menu_text(user), main_menu_kb())
+    await call.answer()
 
 
-    if is_user_banned(user_id):
-        await callback.answer("❌ Вы забанены!", show_alert=True)
-        return
-
-    number_type = callback.data.split(":", 1)[1]
-    if number_type not in ("reg", "nereg"):
-        number_type = "reg"
-
-    user_row = get_or_create_user(user_id, callback.from_user.username)
-    price = get_number_price(number_type)
+PRODUCT_MARKS = {"fresh": EMOJI_FRESH, "warm": EMOJI_WARM}
+PRODUCT_ICONS = {"fresh": "5850317551090800862", "warm": "5881806211195605908"}
 
 
-    if user_row["balance"] < price:
-        await callback.message.edit_text(
-            build_insufficient_balance_text(user_row["balance"], price),
-            reply_markup=back_kb(),
-            parse_mode="HTML",
+@router.callback_query(F.data == "buy")
+async def cb_buy(call: CallbackQuery) -> None:
+    user = await ensure_user(call)
+    blocks = []
+    for key, p in PRODUCTS.items():
+        blocks.append(
+            f"{PRODUCT_MARKS[key]} <b>{p['title']}</b>\n"
+            f"└ {EMOJI_PAY_AMOUNT} Цена: <b>{money(p['price'])}</b>"
         )
-        await callback.answer()
+    text = (
+        f"{EMOJI_SHOP} <b>Каталог</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите нужную категорию. Сумма списывается с вашего баланса, "
+        "а товар выдаётся автоматически.</i></blockquote>\n\n"
+        + "\n\n".join(blocks)
+        + f"\n\n{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(user['balance'])}\n\n"
+        "<i>Выберите категорию ниже 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    for key, p in PRODUCTS.items():
+        kb.row(
+            btn(
+                text=f"{p['title']} • {money(p['price'])}",
+                style="success",
+                callback_data=f"item:{key}",
+                icon_custom_emoji_id=PRODUCT_ICONS[key],
+            )
+        )
+    kb.row(back_btn("menu"))
+    await safe_edit(call, text, kb.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("item:"))
+async def cb_item(call: CallbackQuery) -> None:
+    key = call.data.split(":", 1)[1]
+    product = PRODUCTS.get(key)
+    if not product:
+        await call.answer("Товар не найден", show_alert=True)
+        return
+    user = await ensure_user(call)
+    if user["balance"] < product["price"]:
+        await call.answer(
+            f"Недостаточно средств. Нужно {money(product['price'])}, на балансе {money(user['balance'])}.",
+            show_alert=True,
+        )
+        return
+    # Баланса хватает, но товара нет на складе — деньги не списываются
+    await call.answer("😔 Товара нет на складе. Загляните позже.", show_alert=True)
+
+
+@router.callback_query(F.data == "refs")
+async def cb_refs(call: CallbackQuery, bot: Bot) -> None:
+    user = await ensure_user(call)
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{user['user_id']}"
+    refs = await count_referrals(user["user_id"])
+
+    text = (
+        f"{EMOJI_REFS} <b>Реферальная программа</b>\n{SEP}\n\n"
+        f"<blockquote><i>Приглашайте друзей в {html.escape(SHOP_NAME)} и получайте "
+        f"{REF_PERCENT:g}% с каждого их пополнения — без ограничений по времени "
+        f"и количеству приглашённых.\n\n"
+        f"Бонус зачисляется на ваш баланс автоматически сразу после того, как друг "
+        f"пополнит счёт. Просто отправьте ему свою ссылку и наблюдайте, как растёт ваш доход.</i></blockquote>\n\n"
+        f"{EMOJI_STATS} <b>Ваша статистика</b>\n"
+        f"├ Приглашено: <b>{refs}</b>\n"
+        f"└ Заработано: <b>{money(user['ref_earned'])}</b>\n\n"
+        f"{EMOJI_LINK} <b>Ваша ссылка</b>\n"
+        f"<code>{link}</code>"
+    )
+    share_text = quote(f"Заходи в {SHOP_NAME}!")
+    share = btn(
+        text="Поделиться ссылкой",
+        style="success",
+        icon_custom_emoji_id="5264759912025564026",
+        url=f"https://t.me/share/url?url={quote(link, safe='')}&text={share_text}",
+    )
+    await safe_edit(call, text, back_kb(share))
+    await call.answer()
+
+
+@router.callback_query(F.data == "finance")
+async def cb_finance(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user = await ensure_user(call)
+    text = (
+        f"{EMOJI_FINANCE} <b>Финансы</b>\n{SEP}\n\n"
+        "<blockquote><i>Пополняйте баланс в криптовалюте — быстро и без комиссии с нашей стороны. "
+        "Деньги зачисляются автоматически сразу после оплаты.</i></blockquote>\n\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> <b>{money(user['balance'])}</b>\n\n"
+        f"{EMOJI_STATS} <b>Статистика</b>\n"
+        f"├ Всего пополнено: <code>{money(user['deposited'])}</code>\n"
+        f"├ Всего потрачено: <code>{money(user['spent'])}</code>\n"
+        f"└ Реферальный доход: <code>{money(user['ref_earned'])}</code>\n\n"
+        "<i>Выберите действие ниже 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(text="Пополнить баланс", style="success", callback_data="topup",
+               icon_custom_emoji_id="5417924076503062111"))
+    kb.row(btn(text="История пополнений", callback_data="history", icon_custom_emoji_id="5444856076954520455"))
+    kb.row(back_btn("menu"))
+    await safe_edit(call, text, kb.as_markup())
+    await call.answer()
+
+
+PAY_STATUS = {
+    "paid": "✅ Оплачен",
+    "pending": "⏳ Ожидает",
+    "expired": "⌛ Истёк",
+    "cancelled": "✖️ Отменён",
+}
+
+
+@router.callback_query(F.data == "history")
+async def cb_history(call: CallbackQuery) -> None:
+    await ensure_user(call)
+    pays = await user_payments(call.from_user.id)
+    if pays:
+        lines = []
+        for i, p in enumerate(pays):
+            prov, _ = split_id(p["invoice_id"])
+            when = datetime.fromtimestamp(p["created_at"]).strftime("%d.%m %H:%M")
+            branch = "└" if i == len(pays) - 1 else "├"
+            lines.append(
+                f"{branch} <code>{when}</code> • <b>{money(p['amount'])}</b> • "
+                f"{PROVIDERS.get(prov, prov)} • {PAY_STATUS.get(p['status'], p['status'])}"
+            )
+        body = "\n".join(lines)
+    else:
+        body = "<i>Пополнений пока не было.</i>"
+    text = (
+        f"🧾 <b>История пополнений</b>\n{SEP}\n\n"
+        f"<blockquote><i>Последние {len(pays) or 8} операций по вашему аккаунту.</i></blockquote>\n\n"
+        f"{body}"
+    )
+    await safe_edit(call, text, back_kb_to("finance"))
+    await call.answer()
+
+
+# ══════════════════════════════════════════════════════════════
+#  XROCKET: API
+# ══════════════════════════════════════════════════════════════
+class XRocketError(Exception):
+    pass
+
+
+async def xr_request(method: str, path: str, payload: dict | None = None) -> dict:
+    headers = {"Rocket-Pay-Key": XROCKET_API_KEY, "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(
+            method, XROCKET_URL.rstrip("/") + path, json=payload, headers=headers
+        ) as resp:
+            data = await resp.json(content_type=None)
+    if resp.status >= 400 or not isinstance(data, dict) or data.get("success") is False:
+        raise XRocketError(f"HTTP {resp.status}: {str(data)[:300]}")
+    return data.get("data", data)
+
+
+async def xr_create_invoice(user_id: int, amount: float) -> dict:
+    return await xr_request(
+        "POST",
+        "/tg-invoices",
+        {
+            "amount": amount,
+            "numPayments": 1,
+            "currency": PAY_CURRENCY,
+            "description": f"Пополнение баланса {SHOP_NAME}",
+            "hiddenMessage": "Спасибо! Баланс пополнится автоматически.",
+            "commentsEnabled": False,
+            "payload": str(user_id),
+            "expiredIn": INVOICE_TTL,
+        },
+    )
+
+
+async def xr_get_invoice(invoice_id: str) -> dict:
+    return await xr_request("GET", f"/tg-invoices/{invoice_id}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  CRYPTOBOT / @SEND: API (Crypto Pay)
+# ══════════════════════════════════════════════════════════════
+async def cp_request(method: str, params: dict | None = None) -> dict | list:
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_API_KEY, "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            CRYPTOBOT_URL.rstrip("/") + "/" + method, json=params or {}, headers=headers
+        ) as resp:
+            data = await resp.json(content_type=None)
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise XRocketError(f"CryptoBot HTTP {resp.status}: {str(data)[:300]}")
+    return data["result"]
+
+
+async def cp_create_invoice(user_id: int, amount: float) -> dict:
+    return await cp_request(
+        "createInvoice",
+        {
+            "currency_type": "fiat",
+            "fiat": "USD",
+            "amount": f"{amount:.2f}",
+            "description": f"Пополнение баланса {SHOP_NAME}",
+            "payload": str(user_id),
+            "allow_comments": False,
+            "allow_anonymous": False,
+            "expires_in": INVOICE_TTL,
+        },
+    )
+
+
+async def cp_get_invoice(raw_id: str) -> dict:
+    res = await cp_request("getInvoices", {"invoice_ids": raw_id})
+    items = res.get("items", []) if isinstance(res, dict) else res
+    if not items:
+        raise XRocketError("CryptoBot: счёт не найден")
+    return items[0]
+
+
+# ══════════════════════════════════════════════════════════════
+#  ЕДИНЫЙ ИНТЕРФЕЙС ПЛАТЁЖНЫХ СИСТЕМ
+#  id счёта в БД хранится как «<провайдер>-<id>», например cb-123456
+#  (старые счета без префикса считаются xRocket)
+# ══════════════════════════════════════════════════════════════
+def split_id(invoice_id: str) -> tuple[str, str]:
+    prefix, sep, raw = invoice_id.partition("-")
+    if sep and prefix in PROVIDERS:
+        return prefix, raw
+    return "xr", invoice_id
+
+
+async def create_invoice(provider: str, user_id: int, amount: float) -> tuple[str, str]:
+    """Возвращает (id счёта для БД, ссылка на оплату)."""
+    if provider == "cb":
+        inv = await cp_create_invoice(user_id, amount)
+        link = inv.get("bot_invoice_url") or inv.get("pay_url")
+        return f"cb-{inv['invoice_id']}", link
+    inv = await xr_create_invoice(user_id, amount)
+    return f"xr-{inv['id']}", inv["link"]
+
+
+async def invoice_status(invoice_id: str) -> str:
+    """Нормализованный статус: paid / expired / pending."""
+    provider, raw = split_id(invoice_id)
+    if provider == "cb":
+        status = str((await cp_get_invoice(raw)).get("status", "")).lower()
+    else:
+        status = str((await xr_get_invoice(raw)).get("status", "")).lower()
+    return status if status in ("paid", "expired") else "pending"
+
+
+async def delete_invoice(invoice_id: str) -> None:
+    provider, raw = split_id(invoice_id)
+    if provider == "cb":
+        await cp_request("deleteInvoice", {"invoice_id": int(raw)})
+    else:
+        await xr_request("DELETE", f"/tg-invoices/{raw}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  ПОПОЛНЕНИЕ: ЭКРАНЫ
+# ══════════════════════════════════════════════════════════════
+class TopUp(StatesGroup):
+    amount = State()
+
+
+async def edit_or_send(bot: Bot, chat_id: int, message_id: int, text: str, kb: InlineKeyboardMarkup) -> None:
+    try:
+        await bot.edit_message_text(
+            text, chat_id=chat_id, message_id=message_id, reply_markup=kb, disable_web_page_preview=True
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        try:
+            await bot.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            logging.exception("Не удалось отправить сообщение о платеже")
+
+
+def topup_methods_screen() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"{EMOJI_FINANCE} <b>Пополнение баланса</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите удобный способ оплаты. "
+        "Баланс пополнится автоматически сразу после платежа.</i></blockquote>\n\n"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n\n"
+        "<i>Выберите способ оплаты 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    for code, name in PROVIDERS.items():
+        kb.row(btn(text=name, callback_data=f"topup:{code}", icon_custom_emoji_id=PROVIDER_ICONS[code]))
+    kb.row(back_btn("finance"))
+    return text, kb.as_markup()
+
+
+async def topup_screen(user_id: int, provider: str = "xr") -> tuple[str, InlineKeyboardMarkup]:
+    user = await get_user(user_id)
+    balance = user["balance"] if user else 0.0
+    text = (
+        f"{EMOJI_FINANCE} <b>Пополнение через {PROVIDERS[provider]}</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите сумму или введите свою — "
+        "мы выставим счёт, а вы оплатите его в любой удобной криптовалюте.</i></blockquote>\n\n"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(balance)}\n\n"
+        "<i>Выберите сумму ниже 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    amounts = [a for a in TOPUP_AMOUNTS if a >= MIN_TOPUP]
+    if amounts:
+        kb.row(*[btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{provider}:{a:g}") for a in amounts])
+    kb.row(btn(text="Другая сумма", callback_data=f"pay_custom:{provider}", icon_custom_emoji_id="5197269100878907942"))
+    kb.row(back_btn("topup"))
+    return text, kb.as_markup()
+
+
+def invoice_screen(invoice_id: str, amount: float, link: str) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"{EMOJI_STATUS} <b>Счёт на оплату</b>\n{SEP}\n\n"
+        f"<blockquote><i>Нажмите «Оплатить» и завершите платёж в {PROVIDERS[split_id(invoice_id)[0]]}. "
+        "Баланс пополнится автоматически — бот сам проверяет оплату.</i></blockquote>\n\n"
+        f"├ {EMOJI_PAY_AMOUNT} <b>К оплате:</b> {money(amount)}\n"
+        f"├ {EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
+        f"├ {EMOJI_TTL} <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
+        f"└ {EMOJI_STATUS} <b>Статус:</b> ожидает оплаты"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(text="Оплатить", style="success", url=link, icon_custom_emoji_id="5445353829304387411"))
+    kb.row(btn(text="Отменить счёт", style="danger", callback_data=f"cancel:{invoice_id}",
+               icon_custom_emoji_id="5210952531676504517"))
+    return text, kb.as_markup()
+
+
+async def show_invoice(
+    bot: Bot, user_id: int, chat_id: int, message_id: int, amount: float, provider: str
+) -> None:
+    try:
+        invoice_id, link = await create_invoice(provider, user_id, amount)
+    except Exception:
+        logging.exception("%s: не удалось создать счёт", provider)
+        text = (
+            f"⚠️ <b>Не удалось создать счёт</b>\n{SEP}\n\n"
+            "<blockquote><i>Платёжная система временно недоступна. "
+            "Попробуйте ещё раз через минуту или напишите в тех поддержку.</i></blockquote>"
+        )
+        kb = InlineKeyboardBuilder()
+        kb.row(back_btn(f"topup:{provider}"))
+        await edit_or_send(bot, chat_id, message_id, text, kb.as_markup())
         return
 
+    await create_payment(invoice_id, user_id, amount, link, chat_id, message_id)
+    text, kb = invoice_screen(invoice_id, amount, link)
+    await edit_or_send(bot, chat_id, message_id, text, kb)
+    start_watcher(bot, invoice_id)
 
-    user = callback.from_user
-    req_id = create_request(user.id, user.username, number_type)
 
-    await callback.message.edit_text(
-        f"{PHONE_2} <b>В поиске номера ({number_type_label(number_type)})</b>, "
-        "ожидайте в течение 3 минут",
-        reply_markup=user_searching_kb(req_id),
-        parse_mode="HTML",
+# ══════════════════════════════════════════════════════════════
+#  ПОПОЛНЕНИЕ: ФОНОВАЯ ПРОВЕРКА ОПЛАТЫ
+# ══════════════════════════════════════════════════════════════
+watchers: dict[str, asyncio.Task] = {}
+
+
+def start_watcher(bot: Bot, invoice_id: str) -> None:
+    task = watchers.get(invoice_id)
+    if task and not task.done():
+        return
+    watchers[invoice_id] = asyncio.create_task(watch_invoice(bot, invoice_id))
+
+
+async def finalize_paid(bot: Bot, invoice_id: str) -> None:
+    if not await credit_payment(invoice_id):
+        return  # уже зачислено ранее
+    pay = await get_payment(invoice_id)
+    user = await get_user(pay["user_id"])
+    text = (
+        f"✅ <b>Оплата прошла успешно</b>\n{SEP}\n\n"
+        f"<blockquote><i>Баланс пополнен автоматически. "
+        f"Спасибо, что выбираете {html.escape(SHOP_NAME)}!</i></blockquote>\n\n"
+        f"💵 <b>Зачислено:</b> {money(pay['amount'])}\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(user['balance'])}\n"
+        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
-    update_request(
-        req_id,
-        user_msg_chat_id=callback.message.chat.id,
-        user_msg_id=callback.message.message_id,
-    )
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn("menu"))
+    await edit_or_send(bot, pay["chat_id"], pay["message_id"], text, kb.as_markup())
 
-    if ADMIN_CHAT_ID:
-        try:
-            admin_msg = await bot.send_message(
-                ADMIN_CHAT_ID,
-                f"🆕 <b>Новая заявка #{req_id}</b>\n"
-                f"┣ Тип: <b>{number_type_label(number_type)}</b>\n"
-                f"┣ От: @{user.username or user.id}\n"
-                f"┗ Баланс пользователя: {user_row['balance']:.2f}$",
-                reply_markup=admin_new_request_kb(req_id),
-                parse_mode="HTML",
-            )
-            update_request(
-                req_id,
-                admin_msg_chat_id=admin_msg.chat.id,
-                admin_msg_id=admin_msg.message_id,
-            )
-        except Exception:
-            logging.exception(
-                f"Не удалось отправить админу уведомление о заявке #{req_id}"
-            )
+
+async def finalize_expired(bot: Bot, invoice_id: str) -> None:
+    if not await set_payment_status(invoice_id, "expired"):
+        return
+    pay = await get_payment(invoice_id)
+    text = (
+        f"⌛ <b>Счёт истёк</b>\n{SEP}\n\n"
+        "<blockquote><i>Время на оплату вышло, деньги не списаны. "
+        "Создайте новый счёт, чтобы пополнить баланс.</i></blockquote>\n\n"
+        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn(f"topup:{split_id(invoice_id)[0]}"))
+    await edit_or_send(bot, pay["chat_id"], pay["message_id"], text, kb.as_markup())
+
+
+async def watch_invoice(bot: Bot, invoice_id: str) -> None:
+    try:
+        while True:
+            pay = await get_payment(invoice_id)
+            if not pay or pay["status"] != "pending":
+                return
             try:
-                await callback.message.edit_text(
-                    f"{WARNING} <b>Не удалось передать заявку администратору.</b>\n"
-                    "Попробуйте ещё раз позже или напишите в поддержку.",
-                    reply_markup=back_kb(),
-                    parse_mode="HTML",
-                )
+                status = await invoice_status(invoice_id)
             except Exception:
-                logging.exception("Не удалось уведомить пользователя об ошибке отправки заявки админу")
-    else:
-        logging.warning("ADMIN_CHAT_ID не настроен — заявка не будет отправлена админу")
+                logging.warning("Ошибка проверки счёта %s", invoice_id)
+                status = ""
+            if status == "paid":
+                await finalize_paid(bot, invoice_id)
+                return
+            if status == "expired" or time.time() > pay["expires_at"] + 120:
+                await finalize_expired(bot, invoice_id)
+                return
+            await asyncio.sleep(POLL_INTERVAL)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Ошибка в watch_invoice(%s)", invoice_id)
+    finally:
+        watchers.pop(invoice_id, None)
 
-    await callback.answer()
+
+# ══════════════════════════════════════════════════════════════
+#  ПОПОЛНЕНИЕ: ХЕНДЛЕРЫ
+# ══════════════════════════════════════════════════════════════
+@router.callback_query(F.data == "topup")
+async def cb_topup(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await ensure_user(call)
+    text, kb = topup_methods_screen()
+    await safe_edit(call, text, kb)
+    await call.answer()
 
 
-@router.callback_query(F.data == "rules")
-async def cb_rules(callback: CallbackQuery) -> None:
-    price_reg = get_number_price("reg")
-    price_nereg = get_number_price("nereg")
-    penalty = float(get_setting("penalty_amount") or PENALTY_AMOUNT)
-    timeout = int(get_setting("timeout_seconds") or REQUEST_TIMEOUT_SECONDS)
+@router.callback_query(F.data.startswith("topup:"))
+async def cb_topup_method(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await ensure_user(call)
+    provider = call.data.split(":", 1)[1]
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
+        return
+    text, kb = await topup_screen(call.from_user.id, provider)
+    await safe_edit(call, text, kb)
+    await call.answer()
 
-    await callback.message.edit_text(
-        f"{GEAR} <b>Правила пользования сервисом</b>\n\n"
-        f"1. Стоимость номера (Рег): {price_reg:.2f}$\n"
-        f"2. Стоимость номера (Нерег): {price_nereg:.2f}$\n"
-        f"3. Время на получение СМС: {timeout} секунд\n"
-        f"4. Штраф за просрочку: {penalty:.2f}$\n"
-        f"5. Средства не возвращаются после успешной активации\n"
-        f"6. Запрещена перепродажа номеров третьим лицам\n"
-        f"7. При нарушении правил - бан без возврата средств",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
+
+@router.callback_query(F.data.startswith("pay:"))
+async def cb_pay_amount(call: CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    await state.clear()
+    await ensure_user(call)
+    try:
+        _, provider, raw_amount = call.data.split(":")
+        amount = round(float(raw_amount), 2)
+    except ValueError:
+        await call.answer("Неверная сумма", show_alert=True)
+        return
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
+        return
+    if not MIN_TOPUP <= amount <= MAX_TOPUP:
+        await call.answer("Сумма вне допустимого диапазона", show_alert=True)
+        return
+    await call.answer("Создаю счёт…")
+    await show_invoice(bot, call.from_user.id, call.message.chat.id, call.message.message_id, amount, provider)
+
+
+@router.callback_query(F.data.startswith("pay_custom:"))
+async def cb_pay_custom(call: CallbackQuery, state: FSMContext) -> None:
+    provider = call.data.split(":", 1)[1]
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
+        return
+    await state.set_state(TopUp.amount)
+    await state.update_data(msg_id=call.message.message_id, provider=provider)
+    text = (
+        f"{EMOJI_CUSTOM} <b>Своя сумма</b>\n{SEP}\n\n"
+        "<blockquote><i>Отправьте сообщением сумму пополнения в долларах. "
+        "Можно использовать дробные значения, например 7.5</i></blockquote>\n\n"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}"
     )
-    await callback.answer()
-
-@router.callback_query(F.data == "support")
-async def cb_support(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        f"{FOLDER} <b>Поддержка</b>\n\n"
-        f"По всем вопросам пишите: @{SUPPORT_USERNAME}\n\n"
-        f"Пополнение через CryptoBot:\n"
-        f"• USDT (TRC-20)\n"
-        f"• BTC\n"
-        f"• TON\n"
-        f"• ETH\n"
-        f"• LTC\n"
-        f"• BNB\n"
-        f"• TRX",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
-    await callback.answer()
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn(f"topup:{provider}"))
+    await safe_edit(call, text, kb.as_markup())
+    await call.answer()
 
 
-@router.callback_query(F.data.startswith("usercancel:"))
-async def cb_user_cancel(callback: CallbackQuery, bot: Bot) -> None:
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
+@router.message(TopUp.amount, F.text)
+async def msg_custom_amount(message: Message, bot: Bot, state: FSMContext) -> None:
+    raw = message.text.replace("$", "").replace(",", ".").strip()
+    try:
+        amount = round(float(raw), 2)
+    except ValueError:
+        amount = None
 
-    if req is None or req["status"] != "pending":
-        await callback.answer("Эту заявку уже нельзя отменить", show_alert=True)
-        return
-
-    if callback.from_user.id != req["user_id"]:
-        await callback.answer("Это не ваша заявка", show_alert=True)
-        return
-
-    update_request(req_id, status="cancelled")
-
-    await callback.message.edit_text(
-        f"{CROSS} Заявка отменена.", reply_markup=None
-    )
-
-    if req["admin_msg_chat_id"] and req["admin_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["admin_msg_chat_id"],
-                message_id=req["admin_msg_id"],
-                text=f"{CROSS} Заявка #{req_id} отменена пользователем @{req['username'] or req['user_id']}.",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение админа (user cancel)")
-
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("issue:"))
-async def cb_issue_number(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_chat(callback.message.chat.id):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
-    if req is None or req["status"] != "pending":
-        await callback.answer("Заявка уже обработана", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_number)
-    await state.update_data(req_id=req_id)
-
-    await callback.message.answer(
-        f"{KEY} Введите номер телефона для заявки #{req_id} (например, +79991112233):"
-    )
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("reject:"))
-async def cb_reject_request(callback: CallbackQuery, bot: Bot) -> None:
-    if not is_admin_chat(callback.message.chat.id):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
-    if req is None or req["status"] != "pending":
-        await callback.answer("Заявка уже обработана", show_alert=True)
-        return
-
-    update_request(req_id, status="rejected")
-
-    await callback.message.edit_text(
-        f"{CROSS} Заявка #{req_id} отклонена.", reply_markup=None
-    )
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=f"{CROSS} Ваша заявка отклонена администратором.",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение пользователя (reject)")
-
-    await callback.answer()
-
-@router.message(StateFilter(AdminStates.waiting_number), F.chat.id == ADMIN_CHAT_ID)
-async def process_number_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    req_id = data.get("req_id")
-    req = get_request(req_id) if req_id else None
-
-    if req is None or req["status"] != "pending":
-        await message.answer("Заявка больше не активна.")
-        await state.clear()
-        return
-
-    phone_number = message.text.strip()
-
-    price = get_number_price(req["number_type"])
-
-
-
-    current_row = get_or_create_user(req["user_id"], req["username"])
-    if current_row["balance"] < price:
+    if amount is None or not MIN_TOPUP <= amount <= MAX_TOPUP:
         await message.answer(
-            f"❌ Недостаточно средств! Баланс пользователя: {current_row['balance']:.2f}$"
+            f"⚠️ <b>Неверная сумма.</b>\n"
+            f"<i>Введите число от {CURRENCY}{MIN_TOPUP:g} до {CURRENCY}{MAX_TOPUP:g}.</i>"
         )
-        await state.clear()
         return
 
-    new_balance = adjust_balance(req["user_id"], -price)
-
-    update_request(
-        req_id,
-        status="issued",
-        phone_number=phone_number,
-        issued_at=datetime.now(timezone.utc).isoformat(),
-    )
-    req = get_request(req_id)
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=build_issued_text(req),
-                reply_markup=user_issued_kb(req_id),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение пользователя (issue)")
-
-    await message.answer(
-        f"{CHECK} Номер <code>{phone_number}</code> ({number_type_label(req['number_type'])}) "
-        f"выдан @{req['username'] or req['user_id']}. "
-        f"Списано: {price:.2f}$\n"
-        "Жду СМС на свой телефон.\n⏳ Таймер: 3 минуты.",
-        reply_markup=admin_waiting_sms_kb(req_id),
-        parse_mode="HTML",
-    )
-
-    if req["admin_msg_chat_id"] and req["admin_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["admin_msg_chat_id"],
-                message_id=req["admin_msg_id"],
-                text=f"{CHECK} Заявка #{req_id}: номер <code>{phone_number}</code> "
-                f"({number_type_label(req['number_type'])}) выдан. Списано: {price:.2f}$",
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать исходное сообщение админа")
-
-    start_timer(bot, req_id)
-    await state.clear()
-
-@router.callback_query(F.data.startswith("entercode:"))
-async def cb_enter_code(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin_chat(callback.message.chat.id):
-        await callback.answer("Недоступно", show_alert=True)
-        return
-
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
-    if req is None or req["status"] not in ("issued", "code_pending"):
-        await callback.answer("Заявка не в статусе ожидания SMS", show_alert=True)
-        return
-
-    await state.set_state(AdminStates.waiting_code)
-    await state.update_data(req_id=req_id)
-
-    await callback.message.answer(
-        f"{KEY} Введите СМС-код для номера <code>{req['phone_number']}</code>:",
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-@router.message(StateFilter(AdminStates.waiting_code), F.chat.id == ADMIN_CHAT_ID)
-async def process_code_input(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    req_id = data.get("req_id")
-    req = get_request(req_id) if req_id else None
-
-    if req is None or req["status"] not in ("issued", "code_pending"):
-        await message.answer("Заявка больше не активна.")
-        await state.clear()
-        return
-
-    code = message.text.strip()
-    update_request(req_id, sms_code=code)
-
-    await message.answer(
-        f"Код: <code>{code}</code>\nПодтвердите отправку пользователю:",
-        reply_markup=admin_confirm_code_kb(req_id),
-        parse_mode="HTML",
-    )
     await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    provider = data.get("provider", "xr")
+    msg_id = data.get("msg_id")
+    if msg_id is None:
+        sent = await message.answer("⏳ Создаю счёт…")
+        msg_id = sent.message_id
+    await show_invoice(bot, message.from_user.id, message.chat.id, msg_id, amount, provider)
 
-@router.callback_query(F.data.startswith("confirmsend:"))
-async def cb_confirm_send(callback: CallbackQuery, bot: Bot) -> None:
-    if not is_admin_chat(callback.message.chat.id):
-        await callback.answer("Недоступно", show_alert=True)
+
+async def _own_payment(call: CallbackQuery, invoice_id: str) -> dict | None:
+    pay = await get_payment(invoice_id)
+    if not pay or pay["user_id"] != call.from_user.id:
+        await call.answer("Счёт не найден", show_alert=True)
+        return None
+    return pay
+
+
+@router.callback_query(F.data.startswith("cancel:"))
+async def cb_cancel(call: CallbackQuery, bot: Bot) -> None:
+    invoice_id = call.data.split(":", 1)[1]
+    pay = await _own_payment(call, invoice_id)
+    if not pay:
         return
 
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
+    if pay["status"] == "pending":
+        # если деньги уже пришли — не отменяем, а зачисляем
+        try:
+            status = await invoice_status(invoice_id)
+        except Exception:
+            status = ""
+        if status == "paid":
+            await call.answer("✅ Оплата получена!")
+            await finalize_paid(bot, invoice_id)
+            return
+        try:
+            await delete_invoice(invoice_id)
+        except Exception:
+            logging.warning("Не удалось удалить счёт %s", invoice_id)
+        await set_payment_status(invoice_id, "cancelled")
 
-    if req is None or req["status"] not in ("issued", "code_pending") or not req["sms_code"]:
-        await callback.answer("Нечего отправлять", show_alert=True)
+    text, kb = await topup_screen(call.from_user.id, split_id(invoice_id)[0])
+    await safe_edit(call, text, kb)
+    await call.answer("Счёт отменён")
+
+
+@router.callback_query(F.data == "guide")
+async def cb_guide(call: CallbackQuery) -> None:
+    text = (
+        f"<b>🔖 Инструкция</b>\n{SEP}\n\n"
+        f"{NUM_1} <b>Возьмите номер</b>\n"
+        "<i>С баланса замораживается сумма. Вы получаете номер и пароль, если он есть.</i>\n\n"
+        f"{NUM_2} <b>Подтвердите отправку</b>\n"
+        "<i>Введите номер в MAX и нажмите «✅ Код отправлен». На это даётся 5 минут. "
+        "Не успели — заявка сгорит, деньги вернутся.</i>\n\n"
+        f"{NUM_3} <b>Ждите SMS</b>\n"
+        "<i>Бот пришлёт код и пароль в течение 1 минуты.</i>\n\n"
+        f"{NUM_4} <b>Введите код</b>\n"
+        "<i>Как только код получен — средства списываются. Услуга оказана.</i>"
+    )
+    await safe_edit(call, text, back_kb())
+    await call.answer()
+
+
+# ══════════════════════════════════════════════════════════════
+#  АДМИН-ПАНЕЛЬ (/admin)
+# ══════════════════════════════════════════════════════════════
+class IsAdmin(BaseFilter):
+    async def __call__(self, event) -> bool:
+        return bool(event.from_user) and event.from_user.id in ADMIN_IDS
+
+
+admin_router = Router()
+admin_router.message.filter(IsAdmin())
+admin_router.callback_query.filter(IsAdmin())
+
+
+class Admin(StatesGroup):
+    give_user = State()
+    give_amount = State()
+    price = State()
+    min_topup = State()
+
+
+MAX_PRICE = 10000.0
+MAX_GIVE = 100000.0
+
+
+def parse_number(raw: str) -> float | None:
+    try:
+        value = round(float(raw.replace("$", "").replace(",", ".").strip()), 2)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def admin_panel(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    lines = [f"├ {p['title']}: <b>{money(p['price'])}</b>" for p in PRODUCTS.values()]
+    lines.append(f"└ Мин. пополнение: <b>{money(MIN_TOPUP)}</b>")
+    text = (
+        (f"{note}\n\n" if note else "")
+        + f"{EMOJI_SHOP} <b>Админ-панель</b>\n{SEP}\n\n"
+        "<blockquote><i>Управление магазином: баланс пользователей, цены и лимит пополнения.</i></blockquote>\n\n"
+        f"{EMOJI_STATS} <b>Текущие настройки</b>\n" + "\n".join(lines) + "\n\n"
+        "<i>Выберите действие ниже 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(text="Выдать баланс", style="success", callback_data="adm_give",
+               icon_custom_emoji_id="5224257782013769471"))
+    kb.row(btn(text="Изменить цены", callback_data="adm_prices", icon_custom_emoji_id="5409048419211682843"))
+    kb.row(btn(text="Мин. пополнение", callback_data="adm_min", icon_custom_emoji_id="5447183459602669338"))
+    kb.row(back_btn("menu"))
+    return text, kb.as_markup()
+
+
+def prompt_screen(title: str, hint: str, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"{title}\n{SEP}\n\n"
+        f"<blockquote><i>{hint}</i></blockquote>"
+        + (f"\n\n⚠️ <b>{note}</b>" if note else "")
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn("admin"))
+    return text, kb.as_markup()
+
+
+GIVE_TITLE = f"{EMOJI_BALANCE} <b>Выдача баланса</b>"
+
+
+@admin_router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = admin_panel()
+    await message.answer(text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data == "admin")
+async def cb_admin(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = admin_panel()
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+# ── выдача баланса ──
+@admin_router.callback_query(F.data == "adm_give")
+async def cb_adm_give(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Admin.give_user)
+    await state.update_data(msg_id=call.message.message_id)
+    text, kb = prompt_screen(GIVE_TITLE, "Отправьте ID или @username пользователя.")
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@admin_router.message(Admin.give_user, F.text)
+async def msg_give_user(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    target = await find_user(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if not target:
+        text, kb = prompt_screen(
+            GIVE_TITLE, "Отправьте ID или @username пользователя.", "Пользователь не найден. Он должен хотя бы раз запустить бота."
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
         return
+    await state.set_state(Admin.give_amount)
+    await state.update_data(target=target["user_id"])
+    text, kb = prompt_screen(
+        GIVE_TITLE,
+        f"Пользователь: {display_name(target)} (ID {target['user_id']})\n"
+        f"Баланс сейчас: {money(target['balance'])}\n\n"
+        "Отправьте сумму в долларах, например 5 или 7.5",
+    )
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
 
-    cancel_timer(req_id)
-    update_request(req_id, status="completed", completed_at=datetime.now(timezone.utc).isoformat())
-    increment_total_bought(req["user_id"])
 
+@admin_router.message(Admin.give_amount, F.text)
+async def msg_give_amount(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    amount = parse_number(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    target = await get_user(data["target"])
+    if amount is None or not 0 < amount <= MAX_GIVE:
+        text, kb = prompt_screen(
+            GIVE_TITLE,
+            f"Пользователь: {display_name(target)} (ID {target['user_id']})\nОтправьте сумму в долларах.",
+            f"Введите число от 0.01 до {MAX_GIVE:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    new_balance = await admin_give(target["user_id"], amount)
+    await state.clear()
     try:
         await bot.send_message(
-            req["user_id"],
-            f"{KEY} <b>Код для номера {req['phone_number']}:</b>\n<code>{req['sms_code']}</code>",
-            parse_mode="HTML",
+            target["user_id"],
+            f"{EMOJI_BALANCE} <b>Вам начислено {money(amount)}</b>\nВаш баланс: <b>{money(new_balance)}</b>",
         )
-        sent_ok = True
     except Exception:
-        logging.exception("Не удалось отправить код пользователю")
-        sent_ok = False
-
-    if req["user_msg_chat_id"] and req["user_msg_id"]:
-        try:
-            await bot.edit_message_text(
-                chat_id=req["user_msg_chat_id"],
-                message_id=req["user_msg_id"],
-                text=(
-                    f"{CHECK} <b>Номер {req['phone_number']}</b>\n"
-                    f"Код отправлен: <code>{req['sms_code']}</code>"
-                ),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось отредактировать сообщение пользователя (send code)")
-
-    status_note = "отправлен" if sent_ok else "НЕ отправлен (ошибка, см. логи)"
-    await callback.message.edit_text(
-        f"{CHECK} Заявка #{req_id} завершена. Код {status_note} пользователю "
-        f"@{req['username'] or req['user_id']}.",
-        reply_markup=None,
+        pass
+    text, kb = admin_panel(
+        f"✅ <b>Выдано {money(amount)}</b> пользователю {display_name(target)}. Новый баланс: <b>{money(new_balance)}</b>"
     )
-    await callback.answer()
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
 
-@router.callback_query(F.data.startswith("usercodesent:"))
-async def cb_user_code_sent(callback: CallbackQuery, bot: Bot) -> None:
-    req_id = int(callback.data.split(":")[1])
-    req = get_request(req_id)
 
-    if req is None or req["status"] != "issued":
-        await callback.answer("Эта заявка уже неактуальна", show_alert=True)
+# ── цены ──
+@admin_router.callback_query(F.data == "adm_prices")
+async def cb_adm_prices(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text = (
+        f"{EMOJI_PAY_AMOUNT} <b>Цены</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите товар, цену которого нужно изменить.</i></blockquote>"
+    )
+    kb = InlineKeyboardBuilder()
+    for key, p in PRODUCTS.items():
+        kb.row(btn(text=f"{p['title']} • {money(p['price'])}", callback_data=f"adm_price:{key}",
+                   icon_custom_emoji_id=PRODUCT_ICONS.get(key)))
+    kb.row(back_btn("admin"))
+    await safe_edit(call, text, kb.as_markup())
+    await call.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm_price:"))
+async def cb_adm_price(call: CallbackQuery, state: FSMContext) -> None:
+    key = call.data.split(":", 1)[1]
+    if key not in PRODUCTS:
+        await call.answer("Товар не найден", show_alert=True)
         return
+    await state.set_state(Admin.price)
+    await state.update_data(msg_id=call.message.message_id, key=key)
+    p = PRODUCTS[key]
+    text, kb = prompt_screen(
+        f"{EMOJI_PAY_AMOUNT} <b>Цена: {p['title']}</b>",
+        f"Сейчас: {money(p['price'])}\nОтправьте новую цену в долларах, например 0.8",
+    )
+    await safe_edit(call, text, kb)
+    await call.answer()
 
-    if callback.from_user.id != req["user_id"]:
-        await callback.answer("Это не ваша заявка", show_alert=True)
-        return
 
-    update_request(req_id, status="code_pending")
-    req = get_request(req_id)
-
+@admin_router.message(Admin.price, F.text)
+async def msg_price(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    key = data["key"]
+    p = PRODUCTS[key]
+    value = parse_number(message.text)
     try:
-        await callback.message.edit_text(
-            build_waiting_admin_text(req),
-            reply_markup=None,
-            parse_mode="HTML",
-        )
+        await message.delete()
     except Exception:
-        logging.exception("Не удалось отредактировать сообщение пользователя (code sent)")
-
-    if ADMIN_CHAT_ID:
-        try:
-            await bot.send_message(
-                ADMIN_CHAT_ID,
-                (
-                    f"{KEY} <b>Пользователь отправил код по заявке #{req_id}</b>\n"
-                    f"От: @{req['username'] or req['user_id']}\n"
-                    f"Номер: <code>{req['phone_number']}</code>\n\n"
-                    "✍️ Введите код в течение 3 минут, иначе заявка будет возвращена пользователю."
-                ),
-                reply_markup=admin_waiting_sms_kb(req_id),
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Не удалось уведомить админа о нажатии «Код отправлен!»")
-
-    start_admin_timer(bot, req_id)
-    await callback.answer()
+        pass
+    if value is None or not 0 < value <= MAX_PRICE:
+        text, kb = prompt_screen(
+            f"{EMOJI_PAY_AMOUNT} <b>Цена: {p['title']}</b>",
+            f"Сейчас: {money(p['price'])}\nОтправьте новую цену в долларах.",
+            f"Введите число от 0.01 до {MAX_PRICE:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    p["price"] = value
+    await set_setting(f"price:{key}", str(value))
+    await state.clear()
+    text, kb = admin_panel(f"✅ Цена <b>{p['title']}</b> теперь <b>{money(value)}</b>")
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
 
 
+# ── минимальное пополнение ──
+MIN_TITLE = f"{EMOJI_MIN} <b>Минимальное пополнение</b>"
+
+
+@admin_router.callback_query(F.data == "adm_min")
+async def cb_adm_min(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Admin.min_topup)
+    await state.update_data(msg_id=call.message.message_id)
+    text, kb = prompt_screen(
+        MIN_TITLE, f"Сейчас: {money(MIN_TOPUP)}\nОтправьте новый минимум в долларах, например 2"
+    )
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@admin_router.message(Admin.min_topup, F.text)
+async def msg_min_topup(message: Message, bot: Bot, state: FSMContext) -> None:
+    global MIN_TOPUP
+    data = await state.get_data()
+    value = parse_number(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if value is None or not 0 < value <= MAX_TOPUP:
+        text, kb = prompt_screen(
+            MIN_TITLE,
+            f"Сейчас: {money(MIN_TOPUP)}\nОтправьте новый минимум в долларах.",
+            f"Введите число от 0.01 до {MAX_TOPUP:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    MIN_TOPUP = value
+    await set_setting("min_topup", str(value))
+    await state.clear()
+    text, kb = admin_panel(f"✅ Минимальное пополнение теперь <b>{money(value)}</b>")
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ЗАПУСК
+# ══════════════════════════════════════════════════════════════
 async def main() -> None:
-    init_db()
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    await init_db()
+    await load_settings()
+
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(router)
+
+    if not ADMIN_IDS:
+        logging.warning("ADMIN_IDS не задан — админ-панель (/admin) недоступна")
+    if XROCKET_API_KEY.startswith("PASTE_"):
+        logging.warning("XROCKET_API_KEY не задан — пополнение через xRocket работать не будет")
+    if CRYPTOBOT_API_KEY.startswith("PASTE_"):
+        logging.warning("CRYPTOBOT_API_KEY не задан — пополнение через CryptoBot работать не будет")
+    for invoice_id in await pending_payments():
+        start_watcher(bot, invoice_id)  # продолжаем следить за счетами после перезапуска
+
     await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Бот запущен")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
