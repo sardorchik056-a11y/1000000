@@ -28,7 +28,7 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -1309,6 +1309,24 @@ async def msg_min_topup(message: Message, bot: Bot, state: FSMContext) -> None:
 # ══════════════════════════════════════════════════════════════
 #  ЗАПУСК
 # ══════════════════════════════════════════════════════════════
+async def ensure_no_webhook(bot: Bot, attempts: int = 5) -> None:
+    """Гарантированно удаляет webhook (иначе getUpdates даёт Conflict)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            info = await bot.get_webhook_info()
+            if info.url:
+                logging.warning("Найден активный webhook: %s — удаляю", info.url)
+            await bot.delete_webhook(drop_pending_updates=True)
+            info = await bot.get_webhook_info()
+            if not info.url:
+                logging.info("Webhook удалён, работаем через polling")
+                return
+        except Exception as e:
+            logging.error("Не удалось удалить webhook (попытка %s/%s): %s", attempt, attempts, e)
+        await asyncio.sleep(2)
+    logging.error("Webhook не удалился — возможно, другой процесс с этим же токеном снова его ставит")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     await init_db()
@@ -1328,9 +1346,19 @@ async def main() -> None:
     for invoice_id in await pending_payments():
         start_watcher(bot, invoice_id)  # продолжаем следить за счетами после перезапуска
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    await ensure_no_webhook(bot)
     logging.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        while True:
+            try:
+                await dp.start_polling(bot, handle_signals=False)
+                break
+            except TelegramConflictError as e:
+                logging.error("Conflict: %s — снова удаляю webhook и перезапускаю polling", e)
+                await ensure_no_webhook(bot)
+                await asyncio.sleep(3)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
