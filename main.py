@@ -1327,6 +1327,21 @@ async def ensure_no_webhook(bot: Bot, attempts: int = 5) -> None:
     logging.error("Webhook не удалился — возможно, другой процесс с этим же токеном снова его ставит")
 
 
+async def webhook_watchdog(bot: Bot, interval: int = 10) -> None:
+    """Фоновая проверка: если кто-то снова поставил webhook — сразу удаляем."""
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url:
+                logging.warning("Watchdog: обнаружен webhook %s — удаляю", info.url)
+                await bot.delete_webhook(drop_pending_updates=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.error("Watchdog: ошибка проверки webhook: %s", e)
+        await asyncio.sleep(interval)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     await init_db()
@@ -1347,6 +1362,7 @@ async def main() -> None:
         start_watcher(bot, invoice_id)  # продолжаем следить за счетами после перезапуска
 
     await ensure_no_webhook(bot)
+    watchdog_task = asyncio.create_task(webhook_watchdog(bot))
     logging.info("Бот запущен")
     try:
         while True:
@@ -1358,6 +1374,7 @@ async def main() -> None:
                 await ensure_no_webhook(bot)
                 await asyncio.sleep(3)
     finally:
+        watchdog_task.cancel()
         await bot.session.close()
 
 
