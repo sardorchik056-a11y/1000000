@@ -56,7 +56,7 @@ SUPPORT_USERNAME = "support"  # ← впишите username поддержки �
 # Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 # Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
-ADMIN_IDS = {8854740379}  # ← ID админов через запятую: {111, 222}
+ADMIN_IDS = {8854740379, 8118184388}  # ← ID админов через запятую: {111, 222}
 SHOP_NAME = "XYLI SHOP"
 DB_PATH = "bot.db"  # на Render с Persistent Disk поменяйте на "/data/bot.db"
 REF_PERCENT = 10.0  # % от пополнений реферала
