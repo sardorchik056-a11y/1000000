@@ -4,17 +4,17 @@ Telegram-бот: главное меню + пополнение через xRock
 Установка:
     pip install -U aiogram aiosqlite aiohttp
 
-Запуск:
-    export BOT_TOKEN="123:ABC"
-    export XROCKET_API_KEY="ключ из @xrocket → Rocket Pay → Create App → API token"
-    export CRYPTOBOT_API_KEY="токен из @send (или @CryptoBot) → Crypto Pay → Create App"
-    export SUPPORT_USERNAME="your_support"     # без @
-    export SUPPORT_URL="https://t.me/your_support"   # ссылка кнопки «Тех поддержка»
-    export ADMIN_IDS="123456789"               # ID админов через запятую, панель — /admin
-    python main.py
+Переменные окружения (на Render → Environment, только эти три):
+    BOT_TOKEN            — токен бота из @BotFather
+    XROCKET_API_KEY      — ключ xRocket Pay
+    CRYPTOBOT_API_KEY    — ключ Crypto Pay (@send / @CryptoBot)
+Всё остальное (поддержка, админы, название, комиссия) — в блоке НАСТРОЙКИ ниже.
+Render сам выдаёт PORT и RENDER_EXTERNAL_URL — их задавать не нужно.
+Start Command: python main.py
 """
 
 import asyncio
+import hashlib
 import html
 import logging
 import math
@@ -26,6 +26,8 @@ from urllib.parse import quote
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
@@ -38,26 +40,37 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ══════════════════════════════════════════════════════════════
 #  НАСТРОЙКИ
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8997019153:AAGeuZuCiE_3WY5jdlKyoiwzF3h_PcD8ro4")
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN не задан — добавьте его в Environment Variables на Render")
+
+# ── Webhook (Render) ───────────────────────────────────────────
+# Render сам выставляет RENDER_EXTERNAL_URL и PORT. Если URL нет — работаем через polling (локально).
+WEBHOOK_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+PORT = int(os.getenv("PORT", "10000"))
+# Путь и секрет выводятся из токена, поэтому отдельные переменные не нужны (но можно задать WEBHOOK_SECRET)
+_token_hash = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+WEBHOOK_PATH = f"/webhook/{_token_hash[:24]}"
+WEBHOOK_SECRET = _token_hash[24:56]
+SUPPORT_USERNAME = "support"  # ← впишите username поддержки без @
 # Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
-SUPPORT_URL = os.getenv("SUPPORT_URL", f"https://t.me/{SUPPORT_USERNAME}")
+SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 # Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8854740379").replace(" ", "").split(",") if x.isdigit()}
-SHOP_NAME = os.getenv("SHOP_NAME", "XYLI SHOP")
-DB_PATH = os.getenv("DB_PATH", "bot.db")
-REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
+ADMIN_IDS = {8854740379}  # ← ID админов через запятую: {111, 222}
+SHOP_NAME = "XYLI SHOP"
+DB_PATH = "bot.db"  # на Render с Persistent Disk поменяйте на "/data/bot.db"
+REF_PERCENT = 10.0  # % от пополнений реферала
 CURRENCY = "$"
 
 # ── xRocket (оплата) ───────────────────────────────────────────
-XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "034cea3212dcfe762c3dc3093")
-XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
-PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "PASTE_XROCKET_API_KEY")
+XROCKET_URL = "https://pay.xrocket.tg"  # для testnet укажите URL из документации xRocket
+PAY_CURRENCY = "USDT"   # валюта счёта (1 USDT = 1 $)
 
 # ── CryptoBot / @send (Crypto Pay API) ─────────────────────────
-CRYPTOBOT_API_KEY = os.getenv("CRYPTOBOT_API_KEY", "600697:AAy9p1zKJ6S5ffH51Rt9YsdPJC3HstLuZ96")
+CRYPTOBOT_API_KEY = os.getenv("CRYPTOBOT_API_KEY", "PASTE_CRYPTOBOT_API_KEY")
 # mainnet: https://pay.crypt.bot/api   |   testnet: https://testnet-pay.crypt.bot/api
-CRYPTOBOT_URL = os.getenv("CRYPTOBOT_URL", "https://pay.crypt.bot/api")
+CRYPTOBOT_URL = "https://pay.crypt.bot/api"
 
 # Способы пополнения: код -> название на кнопке
 PROVIDERS = {"xr": "xRocket", "cb": "CryptoBot (@send)"}
@@ -1361,9 +1374,48 @@ async def main() -> None:
     for invoice_id in await pending_payments():
         start_watcher(bot, invoice_id)  # продолжаем следить за счетами после перезапуска
 
+    if WEBHOOK_BASE_URL:
+        await run_webhook(bot, dp)
+    else:
+        await run_polling(bot, dp)
+
+
+async def run_webhook(bot: Bot, dp: Dispatcher) -> None:
+    """Режим для Render: aiohttp-сервер принимает обновления от Telegram."""
+    webhook_url = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
+
+    async def health(_: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+
+    await bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=dp.resolve_used_update_types(),
+        drop_pending_updates=False,
+    )
+    logging.info("Бот запущен через webhook: %s (порт %s)", f"{WEBHOOK_BASE_URL}/webhook/***", PORT)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        # webhook при остановке не удаляем: при деплое на Render новый инстанс уже мог выставить свой
+        await runner.cleanup()
+        await bot.session.close()
+
+
+async def run_polling(bot: Bot, dp: Dispatcher) -> None:
+    """Локальный режим без публичного URL."""
     await ensure_no_webhook(bot)
     watchdog_task = asyncio.create_task(webhook_watchdog(bot))
-    logging.info("Бот запущен")
+    logging.info("Бот запущен через polling")
     try:
         while True:
             try:
