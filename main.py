@@ -52,7 +52,7 @@ PORT = int(os.getenv("PORT", "10000"))
 _token_hash = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
 WEBHOOK_PATH = f"/webhook/{_token_hash[:24]}"
 WEBHOOK_SECRET = _token_hash[24:56]
-SUPPORT_USERNAME = "support_xyli_shop"  # ← впишите username поддержки без @
+SUPPORT_USERNAME = "sup_xyli_shop"  # ← впишите username поддержки без @
 # Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 # Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
